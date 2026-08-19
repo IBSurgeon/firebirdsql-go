@@ -23,6 +23,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 package firebirdsql
 
+import "fmt"
+
 type User struct {
 	Username   *string
 	Password   *string
@@ -242,53 +244,67 @@ func (um *UserManager) GetUsers() ([]User, error) {
 		done <- true
 	}()
 
+	// Accumulate the whole service stream before parsing: the server splits
+	// records at arbitrary chunk boundaries, so a user record can span two chunks
+	// and per-chunk parsing would mis-read one that straddles the boundary.
+	var acc []byte
 	for cont {
 		select {
 		case buf = <-resChan:
-			srb := NewXPBReader(buf)
-			var (
-				user *User
-				have bool
-				val  byte
-			)
-			for {
-				if have, val = srb.Next(); !have {
-					break
-				}
-				switch val {
-				case isc_spb_sec_username:
-					if user != nil {
-						users = append(users, *user)
-					}
-					u := NewUser(WithUsername(srb.GetString()))
-					user = &u
-				case isc_spb_sec_firstname:
-					s := srb.GetString()
-					user.FirstName = &s
-				case isc_spb_sec_middlename:
-					s := srb.GetString()
-					user.MiddleName = &s
-				case isc_spb_sec_lastname:
-					s := srb.GetString()
-					user.LastName = &s
-				case isc_spb_sec_userid:
-					user.UserId = srb.GetInt32()
-				case isc_spb_sec_groupid:
-					user.GroupId = srb.GetInt32()
-				case isc_spb_sec_admin:
-					a := srb.GetInt32() > 0
-					user.Admin = &a
-				}
-			}
-			if user != nil {
-				users = append(users, *user)
-			}
+			acc = append(acc, buf...)
 		case <-done:
 			cont = false
 		}
 	}
+	if err != nil {
+		return nil, err
+	}
 
-	return users, err
+	srb := NewXPBReader(acc)
+	var user *User
+	for {
+		have, val := srb.Next()
+		if !have {
+			break
+		}
+		// Every non-username tag belongs to the user opened by the preceding
+		// username tag; a stream leading with a field tag would deref a nil user.
+		if val != isc_spb_sec_username && user == nil {
+			return nil, fmt.Errorf("firebirdsql: user field 0x%02x before any username", val)
+		}
+		switch val {
+		case isc_spb_sec_username:
+			if user != nil {
+				users = append(users, *user)
+			}
+			u := NewUser(WithUsername(srb.GetString()))
+			user = &u
+		case isc_spb_sec_firstname:
+			s := srb.GetString()
+			user.FirstName = &s
+		case isc_spb_sec_middlename:
+			s := srb.GetString()
+			user.MiddleName = &s
+		case isc_spb_sec_lastname:
+			s := srb.GetString()
+			user.LastName = &s
+		case isc_spb_sec_userid:
+			user.UserId = srb.GetInt32()
+		case isc_spb_sec_groupid:
+			user.GroupId = srb.GetInt32()
+		case isc_spb_sec_admin:
+			a := srb.GetInt32() > 0
+			user.Admin = &a
+		}
+	}
+	if err := srb.Err(); err != nil {
+		return nil, err
+	}
+	if user != nil {
+		users = append(users, *user)
+	}
+
+	return users, nil
 }
 
 func (um *UserManager) adminRoleMappingAction(action byte) error {

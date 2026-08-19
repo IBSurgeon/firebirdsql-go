@@ -23,11 +23,20 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 package firebirdsql
 
+import "fmt"
+
 const xpbPreallocBufSize = 16
 
+// XPBReader is a cursor over a Firebird parameter block. The buffer may be
+// server-supplied (e.g. a service-info response), so every read is
+// bounds-checked: a read past the end consumes the rest of the buffer,
+// returns zero, and sets a sticky error. Callers that surface a read value
+// must check Err() — like bufio.Scanner, the cursor keeps returning zero
+// once a read fails, so Next()/End() loops terminate.
 type XPBReader struct {
 	buf []byte
 	pos int
+	err error
 }
 
 type XPBWriter struct {
@@ -35,7 +44,21 @@ type XPBWriter struct {
 }
 
 func NewXPBReader(buf []byte) *XPBReader {
-	return &XPBReader{buf, 0}
+	return &XPBReader{buf: buf}
+}
+
+// fail records the first out-of-bounds read and parks the cursor at the end so
+// later Next()/End() calls terminate any consumer loop.
+func (pb *XPBReader) fail(format string, args ...any) {
+	if pb.err == nil {
+		pb.err = fmt.Errorf("firebirdsql: "+format, args...)
+	}
+	pb.pos = len(pb.buf)
+}
+
+// Err returns the first bounds violation encountered, or nil.
+func (pb *XPBReader) Err() error {
+	return pb.err
 }
 
 func (pb *XPBReader) Next() (have bool, value byte) {
@@ -48,6 +71,10 @@ func (pb *XPBReader) Next() (have bool, value byte) {
 }
 
 func (pb *XPBReader) Skip(count int) {
+	if count < 0 || pb.pos+count > len(pb.buf) {
+		pb.fail("parameter block skip of %d out of range", count)
+		return
+	}
 	pb.pos += count
 }
 
@@ -56,30 +83,49 @@ func (pb *XPBReader) End() bool {
 }
 
 func (pb *XPBReader) Get() byte {
-	b := pb.buf[pb.pos]
-	return b
+	if pb.pos >= len(pb.buf) {
+		pb.fail("parameter block read past end")
+		return 0
+	}
+	return pb.buf[pb.pos]
 }
 
 func (pb *XPBReader) GetString() string {
 	l := int(pb.GetInt16())
+	if l < 0 || pb.pos+l > len(pb.buf) {
+		pb.fail("parameter block string length %d out of range", l)
+		return ""
+	}
 	s := bytes_to_str(pb.buf[pb.pos : pb.pos+l])
 	pb.pos += l
 	return s
 }
 
 func (pb *XPBReader) GetInt16() int16 {
+	if pb.pos+2 > len(pb.buf) {
+		pb.fail("parameter block int16 read past end")
+		return 0
+	}
 	r := bytes_to_int16(pb.buf[pb.pos : pb.pos+2])
 	pb.pos += 2
 	return r
 }
 
 func (pb *XPBReader) GetInt32() int32 {
+	if pb.pos+4 > len(pb.buf) {
+		pb.fail("parameter block int32 read past end")
+		return 0
+	}
 	r := bytes_to_int32(pb.buf[pb.pos : pb.pos+4])
 	pb.pos += 4
 	return r
 }
 
 func (pb *XPBReader) GetInt64() int64 {
+	if pb.pos+8 > len(pb.buf) {
+		pb.fail("parameter block int64 read past end")
+		return 0
+	}
 	r := bytes_to_int64(pb.buf[pb.pos : pb.pos+8])
 	pb.pos += 8
 	return r
@@ -87,6 +133,7 @@ func (pb *XPBReader) GetInt64() int64 {
 
 func (pb *XPBReader) Reset() {
 	pb.pos = 0
+	pb.err = nil
 }
 
 func NewXPBWriter() *XPBWriter {

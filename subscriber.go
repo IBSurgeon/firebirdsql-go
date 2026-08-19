@@ -173,14 +173,25 @@ func (s *Subscription) connAuxRequest() (int32, string, error) {
 	if err != nil {
 		return -1, "", err
 	}
+	// buf is the server's address response and may be empty; each branch
+	// bounds-checks the bytes it reads before slicing.
+	if len(buf) < 4 {
+		return -1, "", fmt.Errorf("firebirdsql: aux connection response too short (%d bytes)", len(buf))
+	}
 	family := bytes_to_int16(buf[0:2])
 	port := binary.BigEndian.Uint16(buf[2:4])
 
 	var addr netip.Addr
 	switch family {
 	case afInet:
+		if len(buf) < 8 {
+			return -1, "", fmt.Errorf("firebirdsql: aux connection IPv4 address truncated (%d bytes)", len(buf))
+		}
 		addr = netip.AddrFrom4([4]byte(buf[4:8]))
 	case afInet6Linux, afInet6Windows, afInet6Darwin:
+		if len(buf) < 24 {
+			return -1, "", fmt.Errorf("firebirdsql: aux connection IPv6 address truncated (%d bytes)", len(buf))
+		}
 		if reflect.DeepEqual(buf[4:20], []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff}) {
 			addr = netip.AddrFrom4([4]byte(buf[20:24]))
 		} else {

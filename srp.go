@@ -30,7 +30,6 @@ import (
 	"crypto/sha256"
 	"hash"
 	"math/big"
-
 )
 
 const (
@@ -57,9 +56,10 @@ func pad(v *big.Int) []byte {
 		buf[i], buf[j] = buf[j], buf[i]
 	}
 
-	// skip 0
+	// skip leading zero bytes; bound the scan so an all-zero value (e.g. a
+	// zero server public key) yields an empty slice instead of overrunning buf.
 	var i int
-	for i = 0; buf[i] == 0; i++ {
+	for i = 0; i < len(buf) && buf[i] == 0; i++ {
 	}
 	return buf[i:]
 }
@@ -160,7 +160,7 @@ func getServerSeed(v *big.Int) (keyB *big.Int, keyb *big.Int, err error) {
 		return
 	}
 	keyb = new(big.Int).SetBytes(b)
-	gb := new(big.Int).Exp(g, keyb, prime)              // gb = pow(g, b, N)
+	gb := new(big.Int).Exp(g, keyb, prime)                   // gb = pow(g, b, N)
 	kv := new(big.Int).Mod(new(big.Int).Mul(k, v), prime)    // kv = (k * v) % N
 	keyB = new(big.Int).Mod(new(big.Int).Add(kv, gb), prime) // B = (kv + gb) % N
 	return
@@ -170,12 +170,12 @@ func getClientSession(user string, password string, salt []byte, keyA *big.Int, 
 	prime, g, k := getPrime()
 	u := getScramble(keyA, keyB)
 	x := getUserHash(salt, user, password)
-	gx := new(big.Int).Exp(g, x, prime)                     // gx = pow(g, x, N)
+	gx := new(big.Int).Exp(g, x, prime)                          // gx = pow(g, x, N)
 	kgx := new(big.Int).Mod(new(big.Int).Mul(k, gx), prime)      // kgx = (k * gx) % N
 	diff := new(big.Int).Mod(new(big.Int).Sub(keyB, kgx), prime) // diff = (B - kgx) % N
 	ux := new(big.Int).Mod(new(big.Int).Mul(u, x), prime)        // ux = (u * x) % N
 	aux := new(big.Int).Mod(new(big.Int).Add(keya, ux), prime)   // aux = (a + ux) % N
-	sessionSecret := new(big.Int).Exp(diff, aux, prime)     // (B - kg^x) ^ (a + ux)
+	sessionSecret := new(big.Int).Exp(diff, aux, prime)          // (B - kg^x) ^ (a + ux)
 
 	return bigIntToSha1(sessionSecret)
 }

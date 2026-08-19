@@ -129,6 +129,10 @@ func bytes_to_int16(b []byte) int16 {
 	return int16(binary.LittleEndian.Uint16(b))
 }
 
+func bytes_to_uint16(b []byte) uint16 {
+	return binary.LittleEndian.Uint16(b)
+}
+
 func bytes_to_bint64(b []byte) int64 {
 	return int64(binary.BigEndian.Uint64(b))
 }

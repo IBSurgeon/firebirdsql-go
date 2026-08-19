@@ -345,7 +345,11 @@ func (svc *ServiceManager) WaitBuffer(stream chan []byte) error {
 		}
 		switch buf[0] {
 		case isc_info_svc_to_eof:
-			dataLen := bytes_to_int16(buf[1:3])
+			if len(buf) < 4 {
+				return fmt.Errorf("firebirdsql: service stream chunk too short (%d bytes)", len(buf))
+			}
+			// dataLen is a USHORT; read it unsigned so a chunk over 32 KiB can't go negative.
+			dataLen := int(bytes_to_uint16(buf[1:3]))
 			if dataLen == 0 {
 				if buf[3] == isc_info_svc_timeout {
 					break
@@ -356,8 +360,15 @@ func (svc *ServiceManager) WaitBuffer(stream chan []byte) error {
 					break
 				}
 			}
+			if 3+dataLen > len(buf) {
+				return fmt.Errorf("firebirdsql: service stream chunk length %d exceeds buffer (%d bytes)", dataLen, len(buf))
+			}
 			stream <- buf[3 : 3+dataLen]
 		case isc_info_truncated:
+			// Bound the growth: endless isc_info_truncated would overflow bufferLength negative.
+			if bufferLength >= maxWirePayload {
+				return fmt.Errorf("firebirdsql: service response exceeds %d bytes", maxWirePayload)
+			}
 			bufferLength *= 2
 		case isc_info_end:
 			cont = false
@@ -406,11 +417,16 @@ func (svc *ServiceManager) GetString() (result string, end bool, err error) {
 	if buf, err = svc.GetServiceInfo(GetServiceInfoSPBPreamble(), []byte{isc_info_svc_line}, -1); err != nil {
 		return "", false, err
 	}
-	if bytes.Compare(buf[:4], []byte{isc_info_svc_line, 0, 0, isc_info_end}) == 0 {
+	if len(buf) < 4 {
+		return "", false, fmt.Errorf("firebirdsql: service line response too short (%d bytes)", len(buf))
+	}
+	if bytes.Equal(buf[:4], []byte{isc_info_svc_line, 0, 0, isc_info_end}) {
 		return "", true, nil
 	}
 
-	return NewXPBReader(buf[1:]).GetString(), false, nil
+	rdr := NewXPBReader(buf[1:])
+	result = rdr.GetString()
+	return result, false, rdr.Err()
 }
 
 func (svc *ServiceManager) GetServiceInfo(spb []byte, srb []byte, bufferLength int32) ([]byte, error) {
@@ -442,7 +458,8 @@ func (svc *ServiceManager) GetServiceInfoInt(item byte) (int16, error) {
 	if buf, err = svc.GetServiceInfo(GetServiceInfoSPBPreamble(), []byte{item}, BUFFER_LEN); err != nil {
 		return 0, err
 	}
-	return NewXPBReader(buf[1:]).GetInt16(), nil
+	rdr := NewXPBReader(buf[1:])
+	return rdr.GetInt16(), rdr.Err()
 }
 
 func (svc *ServiceManager) GetServiceInfoString(item byte) (string, error) {
@@ -451,7 +468,8 @@ func (svc *ServiceManager) GetServiceInfoString(item byte) (string, error) {
 	if buf, err = svc.GetServiceInfo(GetServiceInfoSPBPreamble(), []byte{item}, -1); err != nil {
 		return "", err
 	}
-	return NewXPBReader(buf[1:]).GetString(), nil
+	rdr := NewXPBReader(buf[1:])
+	return rdr.GetString(), rdr.Err()
 }
 
 func (svc *ServiceManager) GetServerVersionString() (string, error) {
@@ -459,11 +477,17 @@ func (svc *ServiceManager) GetServerVersionString() (string, error) {
 }
 
 func (svc *ServiceManager) GetServerVersion() (FirebirdVersion, error) {
-	if ver, err := svc.GetServerVersionString(); err == nil {
-		return ParseFirebirdVersion(ver), nil
-	} else {
+	ver, err := svc.GetServerVersionString()
+	if err != nil {
 		return FirebirdVersion{}, err
 	}
+	parsed := ParseFirebirdVersion(ver)
+	if parsed.Full == "" {
+		// Turn an unrecognized banner into an error rather than silently returning a
+		// zero version (see ParseFirebirdVersion) that would flip feature gates off.
+		return parsed, fmt.Errorf("firebirdsql: unrecognized server version banner %q", ver)
+	}
+	return parsed, nil
 }
 
 func (svc *ServiceManager) GetArchitecture() (string, error) {
@@ -509,6 +533,9 @@ func (svc *ServiceManager) GetSvrDbInfo() (*SrvDbInfo, error) {
 		case isc_spb_dbname:
 			databases = append(databases, srb.GetString())
 		}
+	}
+	if err := srb.Err(); err != nil {
+		return &SrvDbInfo{}, err
 	}
 
 	return &SrvDbInfo{int(attachmentsCount), int(databasesCount), databases}, nil

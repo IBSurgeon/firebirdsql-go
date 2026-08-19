@@ -199,50 +199,57 @@ func (mm *MaintenanceManager) GetLimboTransactions(database string) ([]int64, er
 		done <- true
 	}()
 
+	// Accumulate the whole stream before parsing; a record may straddle a
+	// chunk boundary (see GetUsers).
+	var acc []byte
 	for cont {
 		select {
 		case buf = <-resChan:
-			srb := NewXPBReader(buf)
-			var (
-				have bool
-				val  byte
-			)
-			for {
-				if have, val = srb.Next(); !have {
-					break
-				}
-				switch val {
-				case isc_spb_single_tra_id:
-					fallthrough
-				case isc_spb_multi_tra_id:
-					tids = append(tids, int64(srb.GetInt32()))
-				case isc_spb_single_tra_id_64:
-					fallthrough
-				case isc_spb_multi_tra_id_64:
-					tids = append(tids, srb.GetInt64())
-				case isc_spb_tra_id:
-					srb.Skip(4)
-				case isc_spb_tra_id_64:
-					srb.Skip(8)
-				case isc_spb_tra_state:
-					fallthrough
-				case isc_spb_tra_advise:
-					srb.Skip(1)
-				case isc_spb_tra_host_site:
-					fallthrough
-				case isc_spb_tra_remote_site:
-					fallthrough
-				case isc_spb_tra_db_path:
-					srb.GetString()
-				}
-			}
+			acc = append(acc, buf...)
 		case <-done:
 			cont = false
-			break
 		}
 	}
+	if err != nil {
+		return nil, err
+	}
 
-	return tids, err
+	srb := NewXPBReader(acc)
+	for {
+		have, val := srb.Next()
+		if !have {
+			break
+		}
+		switch val {
+		case isc_spb_single_tra_id:
+			fallthrough
+		case isc_spb_multi_tra_id:
+			tids = append(tids, int64(srb.GetInt32()))
+		case isc_spb_single_tra_id_64:
+			fallthrough
+		case isc_spb_multi_tra_id_64:
+			tids = append(tids, srb.GetInt64())
+		case isc_spb_tra_id:
+			srb.Skip(4)
+		case isc_spb_tra_id_64:
+			srb.Skip(8)
+		case isc_spb_tra_state:
+			fallthrough
+		case isc_spb_tra_advise:
+			srb.Skip(1)
+		case isc_spb_tra_host_site:
+			fallthrough
+		case isc_spb_tra_remote_site:
+			fallthrough
+		case isc_spb_tra_db_path:
+			srb.GetString()
+		}
+	}
+	if err := srb.Err(); err != nil {
+		return nil, err
+	}
+
+	return tids, nil
 }
 
 func (mm *MaintenanceManager) CommitTransaction(database string, transaction int64) error {

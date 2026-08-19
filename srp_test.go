@@ -24,8 +24,20 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 package firebirdsql
 
 import (
+	"math/big"
 	"testing"
 )
+
+func TestPad(t *testing.T) {
+	// An all-zero value must not run the zero-skip scan past the end of the
+	// buffer; a zero public key is server-controlled input during SRP auth.
+	if got := pad(big.NewInt(0)); len(got) != 0 {
+		t.Errorf("pad(0): got %d bytes, want empty", len(got))
+	}
+	if got := pad(big.NewInt(1)); len(got) != 1 || got[0] != 1 {
+		t.Errorf("pad(1): got %v, want [1]", got)
+	}
+}
 
 func TestSrp(t *testing.T) {
 	user := "SYSDBA"

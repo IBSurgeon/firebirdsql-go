@@ -46,6 +46,18 @@ const (
 	BUFFER_LEN        = 1024
 	MAX_CHAR_LENGTH   = 32767
 	BLOB_SEGMENT_SIZE = 32000
+
+	// maxWirePayload caps a server-claimed payload size before it reaches an
+	// allocation. It applies only to data the server says it will send, never to
+	// client-requested buffer sizes. Legitimate frames stay far below it (BLOB
+	// segments are at most 32000 bytes; info responses are bounded by the
+	// client's requested buffer size).
+	maxWirePayload = 1 << 24 // 16 MiB
+
+	// fetchRowBatchSize is the row count opFetch requests per op_fetch call.
+	// opFetchResponse caps its pre-allocation hint at this value; a well-behaved
+	// server never returns more rows than the driver asked for.
+	fetchRowBatchSize = 400
 )
 
 func _INFO_SQL_SELECT_DESCRIBE_VARS() []byte {
@@ -348,6 +360,10 @@ func (p *wireProtocol) _parse_status_vector() (statusVector, error) {
 				return sv, err
 			}
 			nbytes := int(bytes_to_bint32(b))
+			if nbytes < 0 || nbytes > maxWirePayload {
+				// Malformed length: wire position is now undefined, so flag ErrBadConn to keep this conn out of the pool.
+				return sv, fmt.Errorf("firebirdsql: status vector string length %d out of range: %w", nbytes, driver.ErrBadConn)
+			}
 			b, err = p.recvPacketsAlignment(nbytes)
 			if err != nil {
 				return sv, err
@@ -366,6 +382,10 @@ func (p *wireProtocol) _parse_status_vector() (statusVector, error) {
 				return sv, err
 			}
 			nbytes := int(bytes_to_bint32(b))
+			if nbytes < 0 || nbytes > maxWirePayload {
+				// as above
+				return sv, fmt.Errorf("firebirdsql: status vector string length %d out of range: %w", nbytes, driver.ErrBadConn)
+			}
 			b, err = p.recvPacketsAlignment(nbytes)
 			if err != nil {
 				return sv, err
@@ -379,6 +399,10 @@ func (p *wireProtocol) _parse_status_vector() (statusVector, error) {
 				return sv, err
 			}
 			nbytes := int(bytes_to_bint32(b))
+			if nbytes < 0 || nbytes > maxWirePayload {
+				// as above
+				return sv, fmt.Errorf("firebirdsql: status vector string length %d out of range: %w", nbytes, driver.ErrBadConn)
+			}
 			b, err = p.recvPacketsAlignment(nbytes)
 			if err != nil {
 				return sv, err
@@ -407,6 +431,12 @@ func (p *wireProtocol) _parse_op_response() (int32, []byte, []byte, error) {
 	h := bytes_to_bint32(b[0:4])            // Object handle
 	oid := b[4:12]                          // Object ID
 	buf_len := int(bytes_to_bint32(b[12:])) // Buffer length
+
+	// Reject a malformed buffer length before it reaches an allocation. A
+	// negative value never allocates (the > 0 gate below) but is still malformed.
+	if buf_len < 0 || buf_len > maxWirePayload {
+		return h, oid, nil, fmt.Errorf("firebirdsql: response buffer length %d out of range: %w", buf_len, driver.ErrBadConn)
+	}
 
 	// Receive data buffer if length is greater than zero
 	var buf []byte
@@ -511,6 +541,21 @@ func (p *wireProtocol) _guess_wire_crypt(buf []byte, clientPlugins []string) (st
 	return "", nil
 }
 
+// recvHandshakeBlob reads one length-prefixed field of a connect/cont-auth
+// response, validating the 4-byte length before allocating: a negative value
+// or one above maxWirePayload is a protocol error, not a make() panic.
+func (p *wireProtocol) recvHandshakeBlob(what string) ([]byte, error) {
+	b, err := p.recvPackets(4)
+	if err != nil {
+		return nil, fmt.Errorf("firebirdsql: reading %s length: %w", what, err)
+	}
+	ln := int(bytes_to_bint32(b))
+	if ln < 0 || ln > maxWirePayload {
+		return nil, fmt.Errorf("firebirdsql: %s length %d out of range", what, ln)
+	}
+	return p.recvPacketsAlignment(ln)
+}
+
 func (p *wireProtocol) _parse_connect_response(user string, password string, options map[string]string, clientPublic *big.Int, clientSecret *big.Int) (err error) {
 	p.debugPrint("_parse_connect_response")
 
@@ -558,24 +603,25 @@ func (p *wireProtocol) _parse_connect_response(user string, password string, opt
 	var nonce []byte
 
 	if opcode == op_cond_accept || opcode == op_accept_data {
-		var readLength, ln int
+		var data []byte
+		if data, err = p.recvHandshakeBlob("accept auth data"); err != nil {
+			return
+		}
 
-		b, _ := p.recvPackets(4)
-		ln = int(bytes_to_bint32(b))
-		data, _ := p.recvPacketsAlignment(ln)
-
-		b, _ = p.recvPackets(4)
-		ln = int(bytes_to_bint32(b))
-		pluginName, _ := p.recvPacketsAlignment(ln)
+		var pluginName []byte
+		if pluginName, err = p.recvHandshakeBlob("accept plugin name"); err != nil {
+			return
+		}
 		p.pluginName = bytes_to_str(pluginName)
 
-		b, _ = p.recvPackets(4)
+		if b, err = p.recvPackets(4); err != nil {
+			return
+		}
 		isAuthenticated := bytes_to_bint32(b)
-		readLength += 4
 
-		b, _ = p.recvPackets(4)
-		ln = int(bytes_to_bint32(b))
-		_, _ = p.recvPacketsAlignment(ln) // keys
+		if _, err = p.recvHandshakeBlob("accept keys"); err != nil {
+			return
+		}
 
 		if isAuthenticated == 0 {
 			// Refuse a server-selected auth plugin the client never sanctioned,
@@ -595,7 +641,9 @@ func (p *wireProtocol) _parse_connect_response(user string, password string, opt
 
 				if len(data) == 0 {
 					p.opContAuth(bigIntToBytes(clientPublic), p.pluginName, options["auth_plugin_list"], "")
-					b, _ := p.recvPackets(4)
+					if b, err = p.recvPackets(4); err != nil {
+						return
+					}
 					op := bytes_to_bint32(b)
 					if op == op_response {
 						_, _, _, err = p._parse_op_response() // error occurred
@@ -607,28 +655,36 @@ func (p *wireProtocol) _parse_connect_response(user string, password string, opt
 						return
 					}
 
-					b, _ = p.recvPackets(4)
-					ln = int(bytes_to_bint32(b))
-					data, _ = p.recvPacketsAlignment(ln)
-
-					b, _ = p.recvPackets(4)
-					ln = int(bytes_to_bint32(b))
-					_, _ = p.recvPacketsAlignment(ln) // pluginName
-
-					b, _ = p.recvPackets(4)
-					ln = int(bytes_to_bint32(b))
-					_, _ = p.recvPacketsAlignment(ln) // pluginList
-
-					b, _ = p.recvPackets(4)
-					ln = int(bytes_to_bint32(b))
-					_, _ = p.recvPacketsAlignment(ln) // keys
+					if data, err = p.recvHandshakeBlob("cont-auth data"); err != nil {
+						return
+					}
+					if _, err = p.recvHandshakeBlob("cont-auth plugin name"); err != nil {
+						return
+					}
+					if _, err = p.recvHandshakeBlob("cont-auth plugin list"); err != nil {
+						return
+					}
+					if _, err = p.recvHandshakeBlob("cont-auth keys"); err != nil {
+						return
+					}
 				}
 				if len(data) == 0 {
 					err = errors.New("Your user name and password are not defined. Ask your database administrator to set up a Firebird login.\n")
 					return
 				}
 
-				ln = int(bytes_to_int16(data[:2]))
+				// Validate the salt length and the two slice offsets below against the
+				// bytes actually received before slicing.
+				if len(data) < 2 {
+					err = fmt.Errorf("firebirdsql: SRP server auth data too short (%d bytes)", len(data))
+					return
+				}
+				// USHORT on the wire: read unsigned so it can never present as negative.
+				ln := int(bytes_to_uint16(data[:2]))
+				if 4+ln > len(data) {
+					err = fmt.Errorf("firebirdsql: SRP salt length %d inconsistent with server auth data (%d bytes)", ln, len(data))
+					return
+				}
 				serverSalt := data[2 : ln+2]
 				serverPublic := bigIntFromHexString(bytes_to_str(data[4+ln:]))
 				authData, sessionKey = getClientProof(strings.ToUpper(user), password, serverSalt, clientPublic, serverPublic, clientSecret, p.pluginName)
@@ -689,78 +745,128 @@ func (p *wireProtocol) _parse_connect_response(user string, password string, opt
 	return
 }
 
+// _parse_select_items decodes a describe-vars response (the per-column
+// metadata Firebird sends after op_info_sql for a SELECT or bind list). Every
+// item length and column index is bounds-checked against buf and xsqlda before
+// use. An unrecognized item type is skipped (after its length-prefixed payload
+// is bounds-checked) rather than rejected, so a newer server that adds an item
+// type this driver predates doesn't break every describe response.
 func (p *wireProtocol) _parse_select_items(buf []byte, xsqlda []xSQLVAR) (int, error) {
-	var err error
-	var ln int
 	index := 0
+	// requireIndex guards the xsqlda[index-1] writes: only items that index into
+	// xsqlda call it, so an unrecognized item can be skipped even before any
+	// isc_info_sql_sqlda_seq has set index.
+	requireIndex := func(item int) error {
+		if index < 1 || index > len(xsqlda) {
+			return fmt.Errorf("firebirdsql: describe-vars item 0x%02x with invalid index %d", item, index)
+		}
+		return nil
+	}
 	i := 0
-	for item := int(buf[i]); item != isc_info_end; item = int(buf[i]) {
+	for i < len(buf) {
+		item := int(buf[i])
+		if item == isc_info_end {
+			break
+		}
+		if item == isc_info_truncated {
+			return index, nil // caller issues a continuation request
+		}
+		if item == isc_info_sql_describe_end {
+			i++
+			continue
+		}
 		i++
+		if i+2 > len(buf) {
+			return -1, fmt.Errorf("firebirdsql: truncated describe-vars item 0x%02x", item)
+		}
+		// USHORT on the wire: read unsigned so it can never present as negative.
+		ln := int(bytes_to_uint16(buf[i : i+2]))
+		i += 2
+		if i+ln > len(buf) {
+			return -1, fmt.Errorf("firebirdsql: invalid describe-vars length %d for item 0x%02x", ln, item)
+		}
+		payload := buf[i : i+ln]
+		i += ln
+
 		switch item {
 		case isc_info_sql_sqlda_seq:
-			ln = int(bytes_to_int16(buf[i : i+2]))
-			i += 2
-			index = int(bytes_to_int32(buf[i : i+ln]))
-			i += ln
+			if ln < 4 {
+				return -1, fmt.Errorf("firebirdsql: short sqlda_seq payload (%d bytes)", ln)
+			}
+			index = int(bytes_to_int32(payload))
+			if index < 1 || index > len(xsqlda) {
+				return -1, fmt.Errorf("firebirdsql: sqlda_seq %d out of range [1,%d]", index, len(xsqlda))
+			}
 		case isc_info_sql_type:
-			ln = int(bytes_to_int16(buf[i : i+2]))
-			i += 2
-			sqltype := int(bytes_to_int32(buf[i : i+ln]))
+			if err := requireIndex(item); err != nil {
+				return -1, err
+			}
+			if ln < 4 {
+				return -1, fmt.Errorf("firebirdsql: short sql_type payload (%d bytes)", ln)
+			}
+			sqltype := int(bytes_to_int32(payload))
 			if sqltype%2 != 0 {
 				sqltype--
 			}
 			xsqlda[index-1].sqltype = sqltype
-			i += ln
 		case isc_info_sql_sub_type:
-			ln = int(bytes_to_int16(buf[i : i+2]))
-			i += 2
-			xsqlda[index-1].sqlsubtype = int(bytes_to_int32(buf[i : i+ln]))
-			i += ln
+			if err := requireIndex(item); err != nil {
+				return -1, err
+			}
+			if ln < 4 {
+				return -1, fmt.Errorf("firebirdsql: short sub_type payload (%d bytes)", ln)
+			}
+			xsqlda[index-1].sqlsubtype = int(bytes_to_int32(payload))
 		case isc_info_sql_scale:
-			ln = int(bytes_to_int16(buf[i : i+2]))
-			i += 2
-			xsqlda[index-1].sqlscale = int(bytes_to_int32(buf[i : i+ln]))
-			i += ln
+			if err := requireIndex(item); err != nil {
+				return -1, err
+			}
+			if ln < 4 {
+				return -1, fmt.Errorf("firebirdsql: short scale payload (%d bytes)", ln)
+			}
+			xsqlda[index-1].sqlscale = int(bytes_to_int32(payload))
 		case isc_info_sql_length:
-			ln = int(bytes_to_int16(buf[i : i+2]))
-			i += 2
+			if err := requireIndex(item); err != nil {
+				return -1, err
+			}
+			if ln < 4 {
+				return -1, fmt.Errorf("firebirdsql: short length payload (%d bytes)", ln)
+			}
 			// the length defined in buffer depends on character length of charset
-			xsqlda[index-1].sqllen = int(bytes_to_int32(buf[i : i+ln]))
-			i += ln
+			xsqlda[index-1].sqllen = int(bytes_to_int32(payload))
 		case isc_info_sql_null_ind:
-			ln = int(bytes_to_int16(buf[i : i+2]))
-			i += 2
-			xsqlda[index-1].null_ok = bytes_to_int32(buf[i:i+ln]) != 0
-			i += ln
+			if err := requireIndex(item); err != nil {
+				return -1, err
+			}
+			if ln < 4 {
+				return -1, fmt.Errorf("firebirdsql: short null_ind payload (%d bytes)", ln)
+			}
+			xsqlda[index-1].null_ok = bytes_to_int32(payload) != 0
 		case isc_info_sql_field:
-			ln = int(bytes_to_int16(buf[i : i+2]))
-			i += 2
-			xsqlda[index-1].fieldname = bytes_to_str(buf[i : i+ln])
-			i += ln
+			if err := requireIndex(item); err != nil {
+				return -1, err
+			}
+			xsqlda[index-1].fieldname = bytes_to_str(payload)
 		case isc_info_sql_relation:
-			ln = int(bytes_to_int16(buf[i : i+2]))
-			i += 2
-			xsqlda[index-1].relname = bytes_to_str(buf[i : i+ln])
-			i += ln
+			if err := requireIndex(item); err != nil {
+				return -1, err
+			}
+			xsqlda[index-1].relname = bytes_to_str(payload)
 		case isc_info_sql_owner:
-			ln = int(bytes_to_int16(buf[i : i+2]))
-			i += 2
-			xsqlda[index-1].ownname = bytes_to_str(buf[i : i+ln])
-			i += ln
+			if err := requireIndex(item); err != nil {
+				return -1, err
+			}
+			xsqlda[index-1].ownname = bytes_to_str(payload)
 		case isc_info_sql_alias:
-			ln = int(bytes_to_int16(buf[i : i+2]))
-			i += 2
-			xsqlda[index-1].aliasname = bytes_to_str(buf[i : i+ln])
-			i += ln
-		case isc_info_truncated:
-			return index, err // return next index
-		case isc_info_sql_describe_end:
-			/* NOTHING */
+			if err := requireIndex(item); err != nil {
+				return -1, err
+			}
+			xsqlda[index-1].aliasname = bytes_to_str(payload)
 		default:
-			err = fmt.Errorf("Invalid item [%02x] ! i=%d", buf[i], i)
+			// Unknown item: payload already bounds-checked and skipped above; nothing to do.
 		}
 	}
-	return -1, err // no more info
+	return -1, nil
 }
 
 func (p *wireProtocol) parse_xsqlda(buf []byte, stmtHandle int32) (int32, []xSQLVAR, error) {
@@ -771,17 +877,35 @@ func (p *wireProtocol) parse_xsqlda(buf []byte, stmtHandle int32) (int32, []xSQL
 	i := 0
 
 	for i < len(buf) {
-		if buf[i] == byte(isc_info_sql_stmt_type) && buf[i+1] == byte(0x04) && buf[i+2] == byte(0x00) {
+		// The leading i+3<=len(buf) / i+2<=len(buf) conjuncts keep the buf[i+1]/buf[i+2]
+		// lookahead from running past buf when too few bytes remain; an incomplete
+		// header then falls through to the "else break" like any unrecognized tag.
+		if i+3 <= len(buf) && buf[i] == byte(isc_info_sql_stmt_type) && buf[i+1] == byte(0x04) && buf[i+2] == byte(0x00) {
 			i++
-			ln = int(bytes_to_int16(buf[i : i+2]))
+			// USHORT on the wire: read unsigned so it can never be negative. The ln<4
+			// check below guarantees the 4 bytes bytes_to_int32 reads unconditionally.
+			ln = int(bytes_to_uint16(buf[i : i+2]))
 			i += 2
+			if ln < 4 || i+ln > len(buf) {
+				return stmt_type, nil, fmt.Errorf("firebirdsql: invalid sql_stmt_type payload length %d", ln)
+			}
 			stmt_type = int32(bytes_to_int32(buf[i : i+ln]))
 			i += ln
-		} else if buf[i] == byte(isc_info_sql_select) && buf[i+1] == byte(isc_info_sql_describe_vars) {
+		} else if i+2 <= len(buf) && buf[i] == byte(isc_info_sql_select) && buf[i+1] == byte(isc_info_sql_describe_vars) {
 			i += 2
-			ln = int(bytes_to_int16(buf[i : i+2]))
+			if i+2 > len(buf) {
+				return stmt_type, nil, fmt.Errorf("firebirdsql: truncated select describe-vars length")
+			}
+			ln = int(bytes_to_uint16(buf[i : i+2]))
 			i += 2
+			if ln < 4 || i+ln > len(buf) {
+				return stmt_type, nil, fmt.Errorf("firebirdsql: invalid select describe column-count length %d", ln)
+			}
 			col_len = int(bytes_to_int32(buf[i : i+ln]))
+			// col_len drives an allocation; apply the same bound _fetchBindXsqlda uses.
+			if col_len < 0 || col_len > 65535 {
+				return stmt_type, nil, fmt.Errorf("firebirdsql: invalid select describe column count %d", col_len)
+			}
 			xsqlda = make([]xSQLVAR, col_len)
 			next_index, err = p._parse_select_items(buf[i+ln:], xsqlda)
 			if err != nil {
@@ -897,9 +1021,24 @@ func (p *wireProtocol) getBlobSegments(blobId []byte, transHandle int32) ([]byte
 	for more_data != 2 {
 		p.opGetSegment(blobHandle)
 		more_data, _, rbuf, err = p.opResponse()
+		if err != nil {
+			// A server-reported error (FbError) arrives in a fully parsed frame, so return
+			// it as-is; without this the loop re-issued op_get_segment forever on an error.
+			p.resumeBuffer(suspendBuf)
+			return nil, err
+		}
 		buf := rbuf
 		for len(buf) > 0 {
-			ln := int(bytes_to_int16(buf[0:2]))
+			// Each segment is a USHORT length followed by data; validate the length before slicing.
+			if len(buf) < 2 {
+				p.resumeBuffer(suspendBuf)
+				return nil, fmt.Errorf("firebirdsql: BLOB segment header truncated (%d trailing bytes): %w", len(buf), driver.ErrBadConn)
+			}
+			ln := int(bytes_to_uint16(buf[0:2]))
+			if ln+2 > len(buf) {
+				p.resumeBuffer(suspendBuf)
+				return nil, fmt.Errorf("firebirdsql: BLOB segment length %d exceeds response (%d bytes left): %w", ln, len(buf), driver.ErrBadConn)
+			}
 			blob = append(blob, buf[2:ln+2]...)
 			buf = buf[ln+2:]
 		}
@@ -1268,7 +1407,7 @@ func (p *wireProtocol) opFetch(stmtHandle int32, blr []byte) error {
 	p.packInt(stmtHandle)
 	p.packBytes(blr)
 	p.packInt(0)
-	p.packInt(400)
+	p.packInt(fetchRowBatchSize)
 	_, err := p.sendPackets()
 	return err
 }
@@ -1288,6 +1427,11 @@ func (p *wireProtocol) readRow(xsqlda []xSQLVAR) ([]driver.Value, error) {
 				ln = int(bytes_to_bint32(b))
 			} else {
 				ln = x.ioLength()
+			}
+			// ln comes from the wire (variable-length columns) or the describe (fixed ones).
+			// Reject rather than clamp: this is a streaming read, so under-consuming desyncs the wire.
+			if ln < 0 || ln > maxWirePayload {
+				return nil, fmt.Errorf("firebirdsql: column data length %d out of range: %w", ln, driver.ErrBadConn)
 			}
 			rawValue, err := p.recvPacketsAlignment(ln)
 			if err != nil {
@@ -1324,6 +1468,10 @@ func (p *wireProtocol) readRow(xsqlda []xSQLVAR) ([]driver.Value, error) {
 			} else {
 				ln = x.ioLength()
 			}
+			// Same guard as the branch above.
+			if ln < 0 || ln > maxWirePayload {
+				return nil, fmt.Errorf("firebirdsql: column data length %d out of range: %w", ln, driver.ErrBadConn)
+			}
 			rawValue, err := p.recvPacketsAlignment(ln)
 			if err != nil {
 				return nil, err
@@ -1341,6 +1489,9 @@ func (p *wireProtocol) readRow(xsqlda []xSQLVAR) ([]driver.Value, error) {
 func (p *wireProtocol) opFetchResponse(stmtHandle int32, transHandle int32, xsqlda []xSQLVAR) ([][]driver.Value, bool, error) {
 	p.debugPrint("opFetchResponse")
 	b, err := p.recvPackets(4)
+	if err != nil {
+		return nil, false, fmt.Errorf("firebirdsql: reading fetch response header: %w", errors.Join(err, driver.ErrBadConn))
+	}
 	for bytes_to_bint32(b) == op_dummy {
 		b, _ = p.recvPackets(4)
 	}
@@ -1362,9 +1513,17 @@ func (p *wireProtocol) opFetchResponse(stmtHandle int32, transHandle int32, xsql
 		return nil, false, errors.New("opFetchResponse:Internal Error")
 	}
 	b, err = p.recvPackets(8)
+	if err != nil {
+		return nil, false, err
+	}
 	status := bytes_to_bint32(b[:4])
 	count := int(bytes_to_bint32(b[4:8]))
-	rows := make([][]driver.Value, 0, count) // pre-allocate to known chunk size
+	if count < 0 {
+		return nil, false, fmt.Errorf("firebirdsql: fetch response row count %d out of range: %w", count, driver.ErrBadConn)
+	}
+	// Cap the pre-allocation at fetchRowBatchSize (the rows one op_fetch requests).
+	// The append loop is data-driven, so this bounds only initial capacity, not the result.
+	rows := make([][]driver.Value, 0, min(count, fetchRowBatchSize))
 
 	for count > 0 {
 		r, err2 := p.readRow(xsqlda)

@@ -4,8 +4,9 @@ import (
 	"bytes"
 	"database/sql/driver"
 	"math"
-  "math/big"
+	"math/big"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -80,13 +81,42 @@ func TestScaledIntValue(t *testing.T) {
 		{"positive scale 3", 3, 7, "7000"},
 		{"negative scale -3", -3, 1234, "1.234"},
 		{"negative scale -2", -2, 50, "0.50"},
+		{"positive scale at cap 38", 38, 5, "500000000000000000000000000000000000000"},
+		{"very negative scale routes to scientific, no huge allocation", -1_000_000, 5, "5E-1000000"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			x := &xSQLVAR{sqlscale: tt.sqlscale}
-			got := x.scaledIntValue(tt.input)
+			got, err := x.scaledIntValue(tt.input)
+			require.NoError(t, err)
 			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestScaledIntValue_ScaleOutOfRange(t *testing.T) {
+	// sqlscale is server-controlled; a value above the legitimate NUMERIC/
+	// DECIMAL maximum (38) must be rejected before it drives an unbounded
+	// big.Int.Exp(10, sqlscale) allocation, rather than hanging or OOMing.
+	tests := []struct {
+		name     string
+		sqlscale int
+	}{
+		{"one above cap", maxDecimalScale + 1},
+		{"absurdly large", 1 << 20},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			x := &xSQLVAR{sqlscale: tt.sqlscale}
+			got, err := x.scaledIntValue(5)
+			if err == nil {
+				t.Fatalf("expected error for out-of-range scale %d, got value %v", tt.sqlscale, got)
+			}
+			if !strings.Contains(err.Error(), "out of range") {
+				t.Errorf("unexpected error: %v", err)
+			}
 		})
 	}
 }
@@ -137,7 +167,8 @@ func TestScaledIntValueTrailingZeros(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			x := &xSQLVAR{sqlscale: tt.sqlscale}
-			got := x.scaledIntValue(tt.input)
+			got, err := x.scaledIntValue(tt.input)
+			require.NoError(t, err)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -251,6 +282,32 @@ func TestValueInt128WithScale(t *testing.T) {
 	}
 }
 
+func TestValueInt128_ScaleOutOfRange(t *testing.T) {
+	// sqlscale is server-controlled; the INT128 positive-scale branch has its
+	// own big.Int.Exp(10, sqlscale) call (separate from scaledIntValue, which
+	// only covers SHORT/LONG/INT64) and must be capped the same way.
+	tests := []struct {
+		name     string
+		sqlscale int
+	}{
+		{"one above cap", maxDecimalScale + 1},
+		{"absurdly large", 1 << 20},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			x := &xSQLVAR{sqltype: SQL_TYPE_INT128, sqlscale: tt.sqlscale}
+			got, err := x.value(int128Bytes(big.NewInt(5)), "", "")
+			if err == nil {
+				t.Fatalf("expected error for out-of-range scale %d, got value %v", tt.sqlscale, got)
+			}
+			if !strings.Contains(err.Error(), "out of range") {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
 func TestValuePositiveScale(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -307,7 +364,8 @@ func TestScaledIntValuePositiveOverflow(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			x := &xSQLVAR{sqlscale: tt.sqlscale}
-			got := x.scaledIntValue(tt.input)
+			got, err := x.scaledIntValue(tt.input)
+			require.NoError(t, err)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -331,7 +389,8 @@ func TestScaledIntValuePrecisionLoss(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			x := &xSQLVAR{sqlscale: tt.sqlscale}
-			got := x.scaledIntValue(tt.input)
+			got, err := x.scaledIntValue(tt.input)
+			require.NoError(t, err)
 			assert.Equal(t, tt.want, got)
 		})
 	}

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"errors"
+	"io"
 	"slices"
 	"testing"
 )
@@ -14,22 +15,25 @@ import (
 // Unit tests — no live Firebird server required
 // ---------------------------------------------------------------------------
 
-// testProtocol returns a wireProtocol whose reader is backed by the provided bytes.
+// testProtocol returns a wireProtocol whose reader is backed by the provided
+// bytes. Writes are discarded, so request/response round trips can be tested
+// by laying out the expected responses back to back in data.
 func testProtocol(data []byte) *wireProtocol {
 	p := &wireProtocol{}
 	p.conn.reader = bufio.NewReader(bytes.NewReader(data))
+	p.conn.writer = bufio.NewWriter(io.Discard)
 	return p
 }
 
 // statusBuf is a helper to build synthetic Firebird status-vector byte sequences.
 type statusBuf struct{ buf bytes.Buffer }
 
-func (s *statusBuf) tag(t int32)  { s.int32(t) }
-func (s *statusBuf) end()         { s.tag(isc_arg_end) }
+func (s *statusBuf) tag(t int32) { s.int32(t) }
+func (s *statusBuf) end()        { s.tag(isc_arg_end) }
 func (s *statusBuf) int32(v int32) {
 	_ = binary.Write(&s.buf, binary.BigEndian, v)
 }
-func (s *statusBuf) gds(code int) { s.tag(isc_arg_gds); s.int32(int32(code)) }
+func (s *statusBuf) gds(code int)     { s.tag(isc_arg_gds); s.int32(int32(code)) }
 func (s *statusBuf) warning(code int) { s.tag(isc_arg_warning); s.int32(int32(code)) }
 func (s *statusBuf) str(v string) {
 	s.tag(isc_arg_string)
@@ -99,9 +103,9 @@ func TestParseStatusVector_MultiChain(t *testing.T) {
 	var sb statusBuf
 	// Two chained GDS codes, each with their own params — verifies per-code Params alignment
 	sb.gds(335544665) // code A
-	sb.str("CON_A")  // @1 for A
+	sb.str("CON_A")   // @1 for A
 	sb.gds(335544349) // code B (follow-up detail)
-	sb.str("val=X")  // @1 for B
+	sb.str("val=X")   // @1 for B
 	sb.end()
 
 	sv, err := testProtocol(sb.bytes())._parse_status_vector()

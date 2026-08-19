@@ -28,6 +28,7 @@ package firebirdsql
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 )
@@ -100,26 +101,43 @@ func (e *remoteEvent) cancelEvents() {
 	atomic.StoreInt32(&e.running, 0)
 }
 
-func (e *remoteEvent) getEventCounts(data []byte) []Event {
-	e.mu.Lock()
-	e.prevCounts = make(map[string]int, len(e.events))
-	for k, v := range e.counts {
-		e.prevCounts[k] = v
-		e.counts[k] = 0
+func (e *remoteEvent) getEventCounts(data []byte) ([]Event, error) {
+	// data is the server's event buffer: a version byte, then repeated
+	// <name-length byte><name><4-byte count> records. Offsets are driven by
+	// the name-length byte, so each is bounds-checked before slicing.
+	if len(data) == 0 || data[0] != byte(EPB_version1) {
+		return nil, fmt.Errorf("firebirdsql: malformed event buffer (bad or missing version byte)")
 	}
 
-	for i := 1; i < len(data); {
-		length := int(data[i])
-		i++
-		eventName := string(data[i : i+length])
-		i += length
-		_, found := e.counts[eventName]
-		if found {
-			e.counts[eventName] = int(bytes_to_int32(data[i:]) - 1)
+	if err := func() error {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		e.prevCounts = make(map[string]int, len(e.events))
+		for k, v := range e.counts {
+			e.prevCounts[k] = v
+			e.counts[k] = 0
 		}
-		i += 4
+
+		for i := 1; i < len(data); {
+			length := int(data[i])
+			i++
+			if i+length > len(data) {
+				return fmt.Errorf("firebirdsql: event name length %d exceeds buffer", length)
+			}
+			eventName := string(data[i : i+length])
+			i += length
+			if i+4 > len(data) {
+				return fmt.Errorf("firebirdsql: event count truncated for %q", eventName)
+			}
+			if _, found := e.counts[eventName]; found {
+				e.counts[eventName] = int(bytes_to_int32(data[i:]) - 1)
+			}
+			i += 4
+		}
+		return nil
+	}(); err != nil {
+		return nil, err
 	}
-	e.mu.Unlock()
 
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -136,7 +154,7 @@ func (e *remoteEvent) getEventCounts(data []byte) []Event {
 			RemoteID: atomic.LoadInt32(&e.rid),
 		})
 	}
-	return result
+	return result, nil
 }
 
 func buildEpbSlice(events []string, counts map[string]int) []byte {

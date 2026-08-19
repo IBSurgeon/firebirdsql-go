@@ -111,6 +111,64 @@ func TestXPBReader_Reset(t *testing.T) {
 	assert.Equal(t, "test", xpb.GetString())
 }
 
+func TestXPBReader_BoundsViolationSetsErr(t *testing.T) {
+	cases := []struct {
+		name string
+		read func(*XPBReader)
+	}{
+		{"GetInt16 past end", func(r *XPBReader) { r.GetInt16() }},
+		{"GetInt32 past end", func(r *XPBReader) { r.GetInt32() }},
+		{"GetInt64 past end", func(r *XPBReader) { r.GetInt64() }},
+		{"GetString length past end", func(r *XPBReader) { r.GetString() }},
+		{"Get past end", func(r *XPBReader) { r.Get() }},
+		{"Skip past end", func(r *XPBReader) { r.Skip(100) }},
+		{"Skip negative", func(r *XPBReader) { r.Skip(-1) }},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			// Empty buffer: every read runs immediately past the end.
+			r := NewXPBReader(nil)
+			tt.read(r) // must not panic
+			if r.Err() == nil {
+				t.Fatal("expected sticky error after bounds violation, got nil")
+			}
+			// The cursor must be parked at the end so consumer loops terminate.
+			if !r.End() {
+				t.Error("cursor not parked at end after violation")
+			}
+			if have, _ := r.Next(); have {
+				t.Error("Next() should report no data after a violation")
+			}
+		})
+	}
+}
+
+func TestXPBReader_NegativeStringLength(t *testing.T) {
+	// 0xFFFF parses as a negative int16 length; must fail, not panic.
+	r := NewXPBReader([]byte{0xFF, 0xFF, 'a', 'b'})
+	if s := r.GetString(); s != "" {
+		t.Errorf("got %q, want empty", s)
+	}
+	if r.Err() == nil {
+		t.Fatal("expected error for negative string length, got nil")
+	}
+}
+
+func TestXPBReader_ResetClearsErr(t *testing.T) {
+	r := NewXPBReader([]byte{0x05})
+	r.GetInt32() // past end -> sticky err
+	if r.Err() == nil {
+		t.Fatal("expected error")
+	}
+	r.Reset()
+	if r.Err() != nil {
+		t.Errorf("Reset should clear the sticky error, got: %v", r.Err())
+	}
+	if r.End() {
+		t.Error("Reset should rewind the cursor")
+	}
+}
+
 func TestNewXPBWriter(t *testing.T) {
 	w := NewXPBWriter()
 	require.NotNil(t, w)

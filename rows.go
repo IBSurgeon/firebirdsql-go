@@ -26,6 +26,7 @@ package firebirdsql
 import (
 	"context"
 	"database/sql/driver"
+	"errors"
 	"io"
 	"reflect"
 	"strings"
@@ -147,6 +148,14 @@ func (rows *firebirdsqlRows) Next(dest []driver.Value) (err error) {
 				rows.badConn = true // fetch abandoned mid-stream: wire desynced
 				return cerr
 			}
+			// The fetch decode (readRow, opFetchResponse, getBlobSegments) tags a
+			// malformed-length/count error with driver.ErrBadConn because it aborts
+			// mid-stream with bytes left on the wire. Close() evicts off rows.badConn,
+			// not this return value, so propagate the signal here or the desynced conn
+			// gets pooled.
+			if errors.Is(err, driver.ErrBadConn) {
+				rows.badConn = true
+			}
 			return
 		}
 		rows.currentChunkIdx = 0
@@ -163,6 +172,11 @@ func (rows *firebirdsqlRows) Next(dest []driver.Value) (err error) {
 			var blob []byte
 			blob, err = rows.stmt.fc.wp.getBlobSegments(blobId, rows.stmt.fc.tx.transHandle)
 			if err != nil {
+				// Same as the fetch branch above: getBlobSegments tags its error with
+				// driver.ErrBadConn, and Close() only evicts when rows.badConn is set here.
+				if errors.Is(err, driver.ErrBadConn) {
+					rows.badConn = true
+				}
 				return
 			}
 			if rows.stmt.resultXsqlda[i].sqlsubtype == 1 {

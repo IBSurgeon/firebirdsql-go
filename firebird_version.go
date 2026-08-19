@@ -41,8 +41,14 @@ type FirebirdVersion struct {
 	Raw         string
 }
 
+// ParseFirebirdVersion parses a server version banner. An unrecognized banner
+// returns a zero-value FirebirdVersion with only Raw set (so EqualOrGreater is
+// conservatively false) instead of panicking on the nil regex match.
 func ParseFirebirdVersion(rawVersionString string) FirebirdVersion {
 	res := FirebirdVersionPattern.FindStringSubmatch(rawVersionString)
+	if res == nil {
+		return FirebirdVersion{Raw: rawVersionString}
+	}
 	major, _ := strconv.Atoi(res[4])
 	minor, _ := strconv.Atoi(res[5])
 	patch, _ := strconv.Atoi(res[6])

@@ -25,7 +25,9 @@ package firebirdsql
 
 import (
 	"bytes"
+	"database/sql/driver"
 	"encoding/binary"
+	"fmt"
 	"math/big"
 	"reflect"
 	"strings"
@@ -314,16 +316,27 @@ func (x *xSQLVAR) parseString(raw_value []byte, charset string) interface{} {
 	return raw_value
 }
 
-func (x *xSQLVAR) scaledIntValue(i int64) interface{} {
+// maxDecimalScale bounds sqlscale before it drives big.Int.Exp(10, sqlscale).
+// sqlscale comes off the wire in the describe response (see _parse_select_items'
+// isc_info_sql_scale case); Firebird's legitimate NUMERIC/DECIMAL scale never
+// exceeds 38 (FB4+; 18 older), so a larger value is rejected, not clamped.
+const maxDecimalScale = 38
+
+func (x *xSQLVAR) scaledIntValue(i int64) (interface{}, error) {
 	switch {
 	case x.sqlscale > 0:
+		if x.sqlscale > maxDecimalScale {
+			// Surfaces from inside readRow after the column's raw bytes were consumed but
+			// before the rest of the row is read — the conn is desynced, so mark it bad.
+			return nil, fmt.Errorf("firebirdsql: NUMERIC/DECIMAL scale %d out of range: %w", x.sqlscale, driver.ErrBadConn)
+		}
 		// Plain integer matches isql; formatDecimalGDA would emit "5E+2".
 		mul := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(x.sqlscale)), nil)
-		return new(big.Int).Mul(big.NewInt(i), mul).String()
+		return new(big.Int).Mul(big.NewInt(i), mul).String(), nil
 	case x.sqlscale < 0:
-		return formatDecimalGDA(new(big.Int).Abs(big.NewInt(i)), int32(x.sqlscale), i < 0, "")
+		return formatDecimalGDA(new(big.Int).Abs(big.NewInt(i)), int32(x.sqlscale), i < 0, ""), nil
 	default:
-		return i
+		return i, nil
 	}
 }
 
@@ -348,11 +361,11 @@ func (x *xSQLVAR) value(raw_value []byte, timezone string, charset string) (v in
 			v = x.parseString(raw_value, charset)
 		}
 	case SQL_TYPE_SHORT:
-		v = x.scaledIntValue(int64(int16(bytes_to_bint32(raw_value))))
+		v, err = x.scaledIntValue(int64(int16(bytes_to_bint32(raw_value))))
 	case SQL_TYPE_LONG:
-		v = x.scaledIntValue(int64(bytes_to_bint32(raw_value)))
+		v, err = x.scaledIntValue(int64(bytes_to_bint32(raw_value)))
 	case SQL_TYPE_INT64:
-		v = x.scaledIntValue(bytes_to_bint64(raw_value))
+		v, err = x.scaledIntValue(bytes_to_bint64(raw_value))
 	case SQL_TYPE_INT128:
 		n := new(big.Int).SetBytes(raw_value)
 		if raw_value[0]&0x80 != 0 {
@@ -362,6 +375,11 @@ func (x *xSQLVAR) value(raw_value []byte, timezone string, charset string) (v in
 		case x.sqlscale < 0:
 			v = formatDecimalGDA(new(big.Int).Abs(n), int32(x.sqlscale), n.Sign() < 0, "")
 		case x.sqlscale > 0:
+			if x.sqlscale > maxDecimalScale {
+				// Same desync hazard as scaledIntValue's identical guard above.
+				err = fmt.Errorf("firebirdsql: NUMERIC/DECIMAL scale %d out of range: %w", x.sqlscale, driver.ErrBadConn)
+				break
+			}
 			mul := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(x.sqlscale)), nil)
 			v = new(big.Int).Mul(n, mul).String()
 		default:
