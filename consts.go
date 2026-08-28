@@ -37,8 +37,12 @@ const (
 	// Protocol Version
 	PROTOCOL_VERSION13 = 13
 	PROTOCOL_VERSION16 = 16
+	PROTOCOL_VERSION17 = 17
 	PROTOCOL_VERSION18 = 18 // Firebird 5.0+: scrollable cursors
 	PROTOCOL_VERSION19 = 19 // Firebird 5.0.3+: inline blobs
+
+	// op_execute / op_execute2 cursor flags (protocol 18+)
+	CURSOR_TYPE_SCROLLABLE = 0x01
 
 	CNCT_user              = 1
 	CNCT_passwd            = 2
@@ -253,6 +257,8 @@ const (
 	isc_dpb_reset_icu             = 89
 	isc_dpb_map_attach            = 90
 	isc_dpb_session_time_zone     = 91
+	isc_dpb_max_blob_cache_size   = 103 // protocol 19+
+	isc_dpb_max_inline_blob_size  = 104 // protocol 19+
 
 	// backup
 	isc_spb_bkp_file               = 5
@@ -544,6 +550,40 @@ const (
 	op_crypt                = 96
 	op_crypt_key_callback   = 97
 	op_cond_accept          = 98
+	// Protocol 18+
+	op_fetch_scroll = 112
+	op_info_cursor  = 113
+	// Protocol 19+
+	op_inline_blob = 114
+	// Protocol 16+ batch DML
+	op_batch_create  = 99
+	op_batch_msg     = 100
+	op_batch_exec    = 101
+	op_batch_rls     = 102
+	op_batch_cs      = 103
+	op_batch_cancel  = 109
+	op_batch_sync    = 110
+)
+
+// Batch parameter-buffer tags (protocol 16+).
+const (
+	batchVersion1          = 1
+	batchTagMultiError     = 1
+	batchTagRecordCounts   = 2
+	batchTagBufferBytes    = 3
+	batchTagBlobPolicy     = 4
+	batchTagDetailedErrors = 5
+	batchBlobIDUser        = 2
+)
+
+// Scroll orientations for op_fetch_scroll (protocol 18+).
+const (
+	ScrollNext     int32 = 0
+	ScrollPrior    int32 = 1
+	ScrollFirst    int32 = 2
+	ScrollLast     int32 = 3
+	ScrollAbsolute int32 = 4
+	ScrollRelative int32 = 5
 )
 
 const (

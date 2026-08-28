@@ -118,6 +118,12 @@ type wireProtocol struct {
 
 	// Time Zone
 	timezone string
+
+	// Protocol 18/19 execute trailers and inline blob support.
+	cursorFlags        int32
+	maxInlineBlobSize  int32
+	maxBlobCacheSize   int32
+	inlineBlobCache    *inlineBlobCache
 }
 
 func newWireProtocol(addr string, timezone string, charset string) (*wireProtocol, error) {
@@ -1006,6 +1012,12 @@ func (p *wireProtocol) _fetchBindXsqlda(stmtHandle int32) ([]xSQLVAR, error) {
 }
 
 func (p *wireProtocol) getBlobSegments(blobId []byte, transHandle int32) ([]byte, error) {
+	if id, err := blobIdToInt64(blobId); err == nil && p.inlineBlobCache != nil {
+		if data, ok := p.inlineBlobCache.getAndRemove(transHandle, id); ok {
+			return data, nil
+		}
+	}
+
 	suspendBuf := p.suspendBuffer()
 	blob := []byte{}
 	p.opOpenBlob2(blobId, transHandle)
@@ -1070,6 +1082,8 @@ func advertisedProtocols(wireCompress bool) []string {
 			"ffff800f0000000100000000000001050000000c", // 15, 1, 0, 0x105, 12
 			"ffff80100000000100000000000001050000000e", // 16, 1, 0, 0x105, 14
 			"ffff801100000001000000000000010500000010", // 17, 1, 0, 0x105, 16
+			"ffff801200000001000000000000010500000012", // 18, 1, 0, 0x105, 18
+			"ffff801300000001000000000000010500000014", // 19, 1, 0, 0x105, 20
 		}
 	}
 	return []string{
@@ -1081,6 +1095,8 @@ func advertisedProtocols(wireCompress bool) []string {
 		"ffff800f0000000100000000000000050000000c", // 15, 1, 0, 5, 12
 		"ffff80100000000100000000000000050000000e", // 16, 1, 0, 5, 14
 		"ffff801100000001000000000000000500000010", // 17, 1, 0, 5, 16
+		"ffff801200000001000000000000000500000012", // 18, 1, 0, 5, 18
+		"ffff801300000001000000000000000500000014", // 19, 1, 0, 5, 20
 	}
 }
 
@@ -1127,6 +1143,33 @@ func (p *wireProtocol) appendAuthAndTimezone(dpb []byte) []byte {
 	return dpb
 }
 
+// appendInlineBlobDPB adds protocol-19 inline blob DPB items when negotiated.
+func (p *wireProtocol) appendInlineBlobDPB(dpb []byte) []byte {
+	if p.protocolVersion < PROTOCOL_VERSION19 {
+		return dpb
+	}
+	dpb = bytes.Join([][]byte{
+		dpb,
+		{isc_dpb_max_inline_blob_size, 4}, int32_to_bytes(p.maxInlineBlobSize),
+		{isc_dpb_max_blob_cache_size, 4}, int32_to_bytes(p.maxBlobCacheSize),
+	}, nil)
+	return dpb
+}
+
+// appendExecuteTrailers appends protocol 16+ statement timeout, 18+ cursor flags,
+// and 19+ inline blob size fields to an op_execute / op_execute2 packet.
+func (p *wireProtocol) appendExecuteTrailers() {
+	if p.protocolVersion >= PROTOCOL_VERSION16 {
+		p.appendBytes(bint32_to_bytes(0)) // p_sqldata_timeout
+	}
+	if p.protocolVersion >= PROTOCOL_VERSION18 {
+		p.appendBytes(bint32_to_bytes(p.cursorFlags))
+	}
+	if p.protocolVersion >= PROTOCOL_VERSION19 {
+		p.appendBytes(bint32_to_bytes(p.maxInlineBlobSize))
+	}
+}
+
 func (p *wireProtocol) opCreate(dbName string, user string, password string, role string) error {
 	p.debugPrint("opCreate")
 	var page_size int32
@@ -1151,6 +1194,7 @@ func (p *wireProtocol) opCreate(dbName string, user string, password string, rol
 	}, nil)
 
 	dpb = p.appendAuthAndTimezone(dpb)
+	dpb = p.appendInlineBlobDPB(dpb)
 
 	p.packInt(op_create)
 	p.packInt(0) // Database Object ID
@@ -1192,6 +1236,7 @@ func (p *wireProtocol) opAttach(dbName string, user string, password string, rol
 	}, nil)
 
 	dpb = p.appendAuthAndTimezone(dpb)
+	dpb = p.appendInlineBlobDPB(dpb)
 
 	p.packInt(op_attach)
 	p.packInt(0) // Database Object ID
@@ -1365,10 +1410,7 @@ func (p *wireProtocol) opExecute(stmt *firebirdsqlStmt, params []driver.Value, i
 		p.packInt(1)
 		p.appendBytes(values)
 	}
-	if p.protocolVersion >= PROTOCOL_VERSION16 {
-		// statement timeout
-		p.appendBytes(bint32_to_bytes(0))
-	}
+	p.appendExecuteTrailers()
 	_, err := p.sendPackets()
 	return err
 }
@@ -1396,10 +1438,7 @@ func (p *wireProtocol) opExecute2(stmt *firebirdsqlStmt, params []driver.Value, 
 	p.packBytes(outputBlr)
 	p.packInt(0)
 
-	if p.protocolVersion >= PROTOCOL_VERSION16 {
-		// statement timeout
-		p.appendBytes(bint32_to_bytes(0))
-	}
+	p.appendExecuteTrailers()
 
 	_, err := p.sendPackets()
 	return err
@@ -1412,6 +1451,20 @@ func (p *wireProtocol) opFetch(stmtHandle int32, blr []byte) error {
 	p.packBytes(blr)
 	p.packInt(0)
 	p.packInt(fetchRowBatchSize)
+	_, err := p.sendPackets()
+	return err
+}
+
+// opFetchScroll sends op_fetch_scroll (protocol 18+) for a scrollable cursor.
+func (p *wireProtocol) opFetchScroll(stmtHandle int32, blr []byte, orientation int32, offset int32, count int32) error {
+	p.debugPrint("opFetchScroll")
+	p.packInt(op_fetch_scroll)
+	p.packInt(stmtHandle)
+	p.packBytes(blr)
+	p.packInt(0) // message number
+	p.packInt(count)
+	p.packInt(orientation)
+	p.packInt(offset)
 	_, err := p.sendPackets()
 	return err
 }
@@ -1505,6 +1558,10 @@ func (p *wireProtocol) opFetchResponse(stmtHandle int32, transHandle int32, xsql
 		p._parse_op_response()
 		b, _ = p.recvPackets(4)
 	}
+	b, err = p.consumeInlineBlobsStarting(b)
+	if err != nil {
+		return nil, false, err
+	}
 	if bytes_to_bint32(b) != op_fetch_response {
 		if bytes_to_bint32(b) == op_response {
 			_, _, _, parseErr := p._parse_op_response()
@@ -1541,6 +1598,10 @@ func (p *wireProtocol) opFetchResponse(stmtHandle int32, transHandle int32, xsql
 		// op_fetch_response continuation header, which would desynchronise
 		// the protocol if we consumed the bytes blindly.
 		b, err = p.recvPackets(4)
+		if err != nil {
+			return nil, false, err
+		}
+		b, err = p.consumeInlineBlobsStarting(b)
 		if err != nil {
 			return nil, false, err
 		}
@@ -1706,6 +1767,10 @@ func (p *wireProtocol) opSqlResponse(xsqlda []xSQLVAR) ([]driver.Value, error) {
 		p.lazyResponseCount--
 		_, _, _, _ = p._parse_op_response()
 		b, _ = p.recvPackets(4)
+	}
+	b, err = p.consumeInlineBlobsStarting(b)
+	if err != nil {
+		return nil, err
 	}
 
 	if bytes_to_bint32(b) != op_sql_response {
