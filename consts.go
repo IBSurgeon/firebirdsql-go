@@ -37,6 +37,8 @@ const (
 	// Protocol Version
 	PROTOCOL_VERSION13 = 13
 	PROTOCOL_VERSION16 = 16
+	PROTOCOL_VERSION18 = 18 // Firebird 5.0+: scrollable cursors
+	PROTOCOL_VERSION19 = 19 // Firebird 5.0.3+: inline blobs
 
 	CNCT_user              = 1
 	CNCT_passwd            = 2
