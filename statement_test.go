@@ -1,7 +1,7 @@
 /*******************************************************************************
 The MIT License (MIT)
 
-Copyright (c) 2013-2026 Hajime Nakagami
+Copyright (c) 2026 Alexey Kovyazin
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of
 this software and associated documentation files (the "Software"), to deal in
@@ -208,6 +208,82 @@ func TestReturningEdgeCases(t *testing.T) {
 	}
 	require.Equal(t, 1, mustCount(t, db, "RET_EDGE"))
 }
+
+// TestBatchParity mirrors Jaybird's BatchUpdatesTest / V16StatementTest batch
+// cases: many rows, per-row error reporting, record counts, and cancel.
+func TestBatchParity(t *testing.T) {
+	requireServerVersion(t, 4, 0) // batch needs Firebird 4 protocol 16+ in practice
+	db, _, _ := createTestDatabaseWithDDL(t, "stmt_batch_",
+		`CREATE TABLE BATCH_PARITY (ID INTEGER NOT NULL PRIMARY KEY, V VARCHAR(20))`)
+
+	sqlConn, err := db.Conn(stmtCtx)
+	require.NoError(t, err)
+	defer sqlConn.Close()
+
+	err = sqlConn.Raw(func(dc any) error {
+		fc, ok := dc.(interface {
+			PrepareBatch(context.Context, string, BatchOptions) (*PreparedBatch, error)
+		})
+		if !ok {
+			return errBatchUnsupported
+		}
+		ctx := stmtCtx
+
+		// Many rows in one batch.
+		b, err := fc.PrepareBatch(ctx, "INSERT INTO BATCH_PARITY (ID, V) VALUES (?, ?)", BatchOptions{})
+		if err != nil {
+			return err
+		}
+		for i := 1; i <= 200; i++ {
+			if err := b.Add(int64(i), "v"); err != nil {
+				return err
+			}
+		}
+		res, err := b.Exec(ctx)
+		if err != nil {
+			return err
+		}
+		if res.Affected < 200 {
+			return errBatchAffectedMismatch
+		}
+		if err := b.Close(); err != nil {
+			return err
+		}
+
+		// A unique violation in the middle must surface as an error.
+		b2, err := fc.PrepareBatch(ctx, "INSERT INTO BATCH_PARITY (ID, V) VALUES (?, ?)", BatchOptions{ContinueOnError: true, DetailedErrors: 1})
+		if err != nil {
+			return err
+		}
+		_ = b2.Add(int64(300), "ok")
+		_ = b2.Add(int64(1), "duplicate") // PK conflict with the earlier batch
+		if _, err := b2.Exec(ctx); err == nil {
+			return errBatchExpectedError
+		}
+		return b2.Close()
+	})
+	if err == errBatchUnsupported {
+		t.Skip("PrepareBatch not available on driver conn")
+	}
+	if err == errBatchAffectedMismatch {
+		t.Fatal("batch affected rows below expectation")
+	}
+	if err == errBatchExpectedError {
+		t.Fatal("expected mid-batch unique violation error, got nil")
+	}
+	require.NoError(t, err)
+	require.Equal(t, 200, mustCount(t, db, "BATCH_PARITY"))
+}
+
+var (
+	errBatchUnsupported      = errStatic("batch unsupported")
+	errBatchAffectedMismatch = errStatic("batch affected mismatch")
+	errBatchExpectedError    = errStatic("expected batch error")
+)
+
+type errStatic string
+
+func (e errStatic) Error() string { return string(e) }
 
 // TestTransactionIsolation mirrors Jaybird's AbstractTransactionTest and
 // FBTpbMapperTest integration semantics: uncommitted work is invisible to

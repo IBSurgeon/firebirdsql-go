@@ -318,8 +318,8 @@ func TestAdvertisedProtocolRange(t *testing.T) {
 	const pflagCompress = 0x100
 	for _, wireCompress := range []bool{false, true} {
 		records := advertisedProtocols(wireCompress)
-		if len(records) != 8 {
-			t.Fatalf("wireCompress=%v: %d protocol records, want 8", wireCompress, len(records))
+		if len(records) != 10 {
+			t.Fatalf("wireCompress=%v: %d protocol records, want 10", wireCompress, len(records))
 		}
 		prevWeight := uint32(0)
 		for i, rec := range records {

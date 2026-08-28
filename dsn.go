@@ -79,15 +79,17 @@ func parseDSN(dsns string) (*firebirdDsn, error) {
 	m, _ := url.ParseQuery(u.RawQuery)
 
 	var default_options = map[string]string{
-		"auth_plugin_name":     "Srp256",
-		"auth_plugin_list":     defaultAuthPlugins,
-		"charset":              "UTF8",
-		"column_name_to_lower": "false",
-		"role":                 "",
-		"timezone":             "",
-		"wire_crypt":           "true",
-		"wire_crypt_plugin":    defaultWireCryptPlugins,
-		"wire_compress":        "false",
+		"auth_plugin_name":      "Srp256",
+		"auth_plugin_list":      defaultAuthPlugins,
+		"charset":               "UTF8",
+		"column_name_to_lower":  "false",
+		"role":                  "",
+		"timezone":              "",
+		"wire_crypt":            "true",
+		"wire_crypt_plugin":     defaultWireCryptPlugins,
+		"wire_compress":         "false",
+		"max_inline_blob_size":  "65536",
+		"max_blob_cache_size":   "10485760",
 	}
 
 	for k, v := range default_options {
@@ -97,6 +99,14 @@ func parseDSN(dsns string) (*firebirdDsn, error) {
 		} else {
 			dsn.options[k] = v
 		}
+	}
+
+	// Aliases for protocol-19 blob options (fbx-compatible short names).
+	if values, ok := m["inline_blob_size"]; ok && len(values) > 0 {
+		dsn.options["max_inline_blob_size"] = values[0]
+	}
+	if values, ok := m["blob_cache_size"]; ok && len(values) > 0 {
+		dsn.options["max_blob_cache_size"] = values[0]
 	}
 
 	// Fail fast on an invalid wire_crypt policy before dialing.
