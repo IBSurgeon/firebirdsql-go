@@ -151,13 +151,13 @@ func TestReturningEdgeCases(t *testing.T) {
 		mustExec(t, stmtCtx, db, "INSERT INTO RET_EDGE VALUES (?, ?, NULL)", i, "note")
 	}
 
-	// Single-row UPDATE ... RETURNING works everywhere. (RETURNING of BLOB
-	// columns additionally requires fetching blob values out of the returning
-	// record - covered by the wire-protocol feature branch.)
+	// Single-row UPDATE ... RETURNING works everywhere, including BLOB columns.
 	var id int64
+	var doc string
 	require.NoError(t, db.QueryRow(
-		"UPDATE RET_EDGE SET NOTE = 'single' WHERE ID = 1 RETURNING ID").Scan(&id))
+		"UPDATE RET_EDGE SET NOTE = 'single', DOC = 'blob doc' WHERE ID = 1 RETURNING ID, DOC").Scan(&id, &doc))
 	require.Equal(t, int64(1), id)
+	require.Equal(t, "blob doc", doc)
 
 	// Multi-row UPDATE/DELETE ... RETURNING: Firebird 5 streams every affected
 	// row, while Firebird 4 and older reject the statement with "multiple rows
