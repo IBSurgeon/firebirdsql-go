@@ -1055,6 +1055,35 @@ func (p *wireProtocol) getBlobSegments(blobId []byte, transHandle int32) ([]byte
 	return blob, err
 }
 
+// advertisedProtocols returns the connect-packet protocol descriptors (one
+// 20-byte hex record each) offered to the server. Each record is
+// PROTOCOL_VERSION, Arch type (Generic=1), min, max, weight; with wire
+// compression enabled the max field of protocol 13+ carries pflag_compress.
+func advertisedProtocols(wireCompress bool) []string {
+	if wireCompress {
+		return []string{
+			"0000000a00000001000000000000000500000002", // 10, 1, 0, 5, 2
+			"ffff800b00000001000000000000000500000004", // 11, 1, 0, 5, 4
+			"ffff800c00000001000000000000000500000006", // 12, 1, 0, 5, 6
+			"ffff800d00000001000000000000010500000008", // 13, 1, 0, 0x105, 8
+			"ffff800e0000000100000000000001050000000a", // 14, 1, 0, 0x105, 10
+			"ffff800f0000000100000000000001050000000c", // 15, 1, 0, 0x105, 12
+			"ffff80100000000100000000000001050000000e", // 16, 1, 0, 0x105, 14
+			"ffff801100000001000000000000010500000010", // 17, 1, 0, 0x105, 16
+		}
+	}
+	return []string{
+		"0000000a00000001000000000000000500000002", // 10, 1, 0, 5, 2
+		"ffff800b00000001000000000000000500000004", // 11, 1, 0, 5, 4
+		"ffff800c00000001000000000000000500000006", // 12, 1, 0, 5, 6
+		"ffff800d00000001000000000000000500000008", // 13, 1, 0, 5, 8
+		"ffff800e0000000100000000000000050000000a", // 14, 1, 0, 5, 10
+		"ffff800f0000000100000000000000050000000c", // 15, 1, 0, 5, 12
+		"ffff80100000000100000000000000050000000e", // 16, 1, 0, 5, 14
+		"ffff801100000001000000000000000500000010", // 17, 1, 0, 5, 16
+	}
+}
+
 func (p *wireProtocol) opConnect(dbName string, user string, password string, options map[string]string, clientPublic *big.Int) error {
 	p.debugPrint("opConnect")
 	mode, err := parseWireCryptMode(options["wire_crypt"])
@@ -1067,32 +1096,7 @@ func (p *wireProtocol) opConnect(dbName string, user string, password string, op
 	wire_compress := false
 	wire_compress, _ = strconv.ParseBool(options["wire_compress"]) // errors default to false
 
-	var protocols []string
-	if wire_compress {
-		// PROTOCOL_VERSION, Arch type (Generic=1), min, max|pflag_compress, weight
-		protocols = []string{
-			"0000000a00000001000000000000000500000002", // 10, 1, 0, 5, 2
-			"ffff800b00000001000000000000000500000004", // 11, 1, 0, 5, 4
-			"ffff800c00000001000000000000000500000006", // 12, 1, 0, 5, 6
-			"ffff800d00000001000000000000010500000008", // 13, 1, 0, 0x105, 8
-			"ffff800e0000000100000000000001050000000a", // 14, 1, 0, 0x105, 10
-			"ffff800f0000000100000000000001050000000c", // 15, 1, 0, 0x105, 12
-			"ffff80100000000100000000000001050000000e", // 16, 1, 0, 0x105, 14
-			"ffff801100000001000000000000010500000010", // 17, 1, 0, 0x105, 16
-		}
-	} else {
-		// PROTOCOL_VERSION, Arch type (Generic=1), min, max, weight
-		protocols = []string{
-			"0000000a00000001000000000000000500000002", // 10, 1, 0, 5, 2
-			"ffff800b00000001000000000000000500000004", // 11, 1, 0, 5, 4
-			"ffff800c00000001000000000000000500000006", // 12, 1, 0, 5, 6
-			"ffff800d00000001000000000000000500000008", // 13, 1, 0, 5, 8
-			"ffff800e0000000100000000000000050000000a", // 14, 1, 0, 5, 10
-			"ffff800f0000000100000000000000050000000c", // 15, 1, 0, 5, 12
-			"ffff80100000000100000000000000050000000e", // 16, 1, 0, 5, 14
-			"ffff801100000001000000000000000500000010", // 17, 1, 0, 5, 16
-		}
-	}
+	protocols := advertisedProtocols(wire_compress)
 	p.packInt(op_connect)
 	p.packInt(op_attach)
 	p.packInt(3) // CONNECT_VERSION3
