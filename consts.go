@@ -249,6 +249,9 @@ const (
 	isc_dpb_trusted_auth          = 73
 	isc_dpb_process_name          = 74
 	isc_dpb_utf8_filename         = 77
+	isc_dpb_client_version        = 80
+	isc_dpb_host_name             = 82
+	isc_dpb_os_user               = 83
 	isc_dpb_specific_auth_data    = 84
 	isc_dpb_auth_plugin_list      = 85
 	isc_dpb_auth_plugin_name      = 86
@@ -556,13 +559,13 @@ const (
 	// Protocol 19+
 	op_inline_blob = 114
 	// Protocol 16+ batch DML
-	op_batch_create  = 99
-	op_batch_msg     = 100
-	op_batch_exec    = 101
-	op_batch_rls     = 102
-	op_batch_cs      = 103
-	op_batch_cancel  = 109
-	op_batch_sync    = 110
+	op_batch_create = 99
+	op_batch_msg    = 100
+	op_batch_exec   = 101
+	op_batch_rls    = 102
+	op_batch_cs     = 103
+	op_batch_cancel = 109
+	op_batch_sync   = 110
 )
 
 // Batch parameter-buffer tags (protocol 16+).

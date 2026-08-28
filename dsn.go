@@ -79,17 +79,20 @@ func parseDSN(dsns string) (*firebirdDsn, error) {
 	m, _ := url.ParseQuery(u.RawQuery)
 
 	var default_options = map[string]string{
-		"auth_plugin_name":      "Srp256",
-		"auth_plugin_list":      defaultAuthPlugins,
-		"charset":               "UTF8",
-		"column_name_to_lower":  "false",
-		"role":                  "",
-		"timezone":              "",
-		"wire_crypt":            "true",
-		"wire_crypt_plugin":     defaultWireCryptPlugins,
-		"wire_compress":         "false",
-		"max_inline_blob_size":  "65536",
-		"max_blob_cache_size":   "10485760",
+		"auth_plugin_name":     "Srp256",
+		"auth_plugin_list":     defaultAuthPlugins,
+		"charset":              "UTF8",
+		"client_version":       "",
+		"column_name_to_lower": "false",
+		"host_name":            "",
+		"os_user":              "",
+		"role":                 "",
+		"timezone":             "",
+		"wire_crypt":           "true",
+		"wire_crypt_plugin":    defaultWireCryptPlugins,
+		"wire_compress":        "false",
+		"max_inline_blob_size": "65536",
+		"max_blob_cache_size":  "10485760",
 	}
 
 	for k, v := range default_options {

@@ -32,9 +32,11 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kardianos/osext"
@@ -119,11 +121,17 @@ type wireProtocol struct {
 	// Time Zone
 	timezone string
 
+	// Client identification sent in the attach DPB (populates
+	// MON$ATTACHMENTS.MON$CLIENT_VERSION and related monitoring columns).
+	clientVersion string
+	osUser        string
+	hostName      string
+
 	// Protocol 18/19 execute trailers and inline blob support.
-	cursorFlags        int32
-	maxInlineBlobSize  int32
-	maxBlobCacheSize   int32
-	inlineBlobCache    *inlineBlobCache
+	cursorFlags       int32
+	maxInlineBlobSize int32
+	maxBlobCacheSize  int32
+	inlineBlobCache   *inlineBlobCache
 }
 
 func newWireProtocol(addr string, timezone string, charset string) (*wireProtocol, error) {
@@ -1204,6 +1212,54 @@ func (p *wireProtocol) opCreate(dbName string, user string, password string, rol
 	return err
 }
 
+// defaultClientVersionValue caches the fallback client version string.
+var (
+	clientVersionOnce         sync.Once
+	defaultClientVersionValue string
+)
+
+// defaultClientVersion returns the client version string sent in the attach
+// DPB when the client_version connection option is not set: the module
+// version when the driver is used as a dependency, or "firebirdsql-go".
+func defaultClientVersion() string {
+	clientVersionOnce.Do(func() {
+		v := "firebirdsql-go"
+		if bi, ok := debug.ReadBuildInfo(); ok {
+			if bi.Main.Path == "github.com/nakagami/firebirdsql" && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+				v = "firebirdsql-go/" + bi.Main.Version
+			}
+			for _, d := range bi.Deps {
+				if d.Path == "github.com/nakagami/firebirdsql" && d.Version != "" {
+					v = "firebirdsql-go/" + d.Version
+					break
+				}
+			}
+		}
+		defaultClientVersionValue = v
+	})
+	return defaultClientVersionValue
+}
+
+// appendClientInfoDPB adds client identification items (client version, OS
+// user, host name) so monitoring tables such as MON$ATTACHMENTS report
+// meaningful values for the attachment.
+func (p *wireProtocol) appendClientInfoDPB(dpb []byte) []byte {
+	for _, item := range []struct {
+		tag   byte
+		value string
+	}{
+		{isc_dpb_client_version, p.clientVersion},
+		{isc_dpb_os_user, p.osUser},
+		{isc_dpb_host_name, p.hostName},
+	} {
+		if item.value == "" || len(item.value) > 255 {
+			continue
+		}
+		dpb = bytes.Join([][]byte{dpb, {item.tag, byte(len(item.value))}, []byte(item.value)}, nil)
+	}
+	return dpb
+}
+
 func (p *wireProtocol) opAttach(dbName string, user string, password string, role string) error {
 	p.debugPrint("opAttach")
 	encode := []byte(p.charset)
@@ -1223,6 +1279,20 @@ func (p *wireProtocol) opAttach(dbName string, user string, password string, rol
 	}
 	pid := int32(os.Getpid())
 
+	// Resolve client identification values (DSN options with automatic
+	// defaults) so the attach DPB carries them.
+	if p.clientVersion == "" {
+		p.clientVersion = defaultClientVersion()
+	}
+	if p.osUser == "" {
+		if uid := os.Getuid(); uid >= 0 {
+			p.osUser = strconv.Itoa(uid)
+		}
+	}
+	if p.hostName == "" {
+		p.hostName, _ = os.Hostname()
+	}
+
 	dpb := bytes.Join([][]byte{
 		[]byte{isc_dpb_version1},
 		[]byte{isc_dpb_sql_dialect, 4}, int32_to_bytes(3),
@@ -1235,6 +1305,7 @@ func (p *wireProtocol) opAttach(dbName string, user string, password string, rol
 		[]byte{isc_dpb_utf8_filename, 1, 1},
 	}, nil)
 
+	dpb = p.appendClientInfoDPB(dpb)
 	dpb = p.appendAuthAndTimezone(dpb)
 	dpb = p.appendInlineBlobDPB(dpb)
 
