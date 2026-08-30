@@ -39,6 +39,7 @@ type firebirdDsn struct {
 }
 
 var ErrDsnUserUnknown = errors.New("User unknown")
+var ErrDsnDbNameUnknown = errors.New("Database name unknown")
 
 func newFirebirdDsn() *firebirdDsn {
 	return &firebirdDsn{options: make(map[string]string)}
@@ -74,6 +75,12 @@ func parseDSN(dsns string) (*firebirdDsn, error) {
 	//Windows Path
 	if len(dsn.dbName) >= 2 && strings.ContainsRune(dsn.dbName[2:], ':') {
 		dsn.dbName = dsn.dbName[1:]
+	}
+	if strings.TrimLeft(dsn.dbName, "/") == "" {
+		// Empty (or "/"-only) database path: nothing to attach to. Fail
+		// here with a diagnosable error instead of an obscure attach-time
+		// failure later.
+		return nil, ErrDsnDbNameUnknown
 	}
 
 	m, _ := url.ParseQuery(u.RawQuery)
