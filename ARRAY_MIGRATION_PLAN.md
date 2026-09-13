@@ -1,7 +1,14 @@
 # Array Support Migration Plan for `firebirdsql` (Go)
 
 Generated: 2026-09-12
-**Status: PLANNED** — top-priority item #1 from `FBX_FEATURE_GAP.md` §8 ("Arrays … the largest real functionality gap; fbx proves the wire-level design").
+**Status: IMPLEMENTED** (commit `093688a`). Cross-version validation of the full test suite + the array round-trip tests:
+
+| Server | Port | Result | Notes |
+|---|---|---|---|
+| Firebird 5.0.5 | 3055 | ✅ green | reference server; all 14 array live tests + full suite |
+| Firebird 4.0 | 3054 | ✅ green | full suite |
+| Firebird 3.0 (HQbird) | 3053 | ✅ green | BOOLEAN arrays exercised; server instance had to be restarted after unrelated connection exhaustion |
+| Firebird 2.5.9 HQbird | 3052 | ✅ green | no BOOLEAN — array DDL gated by server version |
 
 Sources analyzed:
 
