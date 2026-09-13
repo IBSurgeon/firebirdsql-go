@@ -87,11 +87,12 @@ Legend: ❌ not implemented in firebirdsql-go · 🟡 partial (exists, but weake
 
 | Feature | Status | Notes |
 |---|---|---|
-| Array read/write via `op_get_slice`/`op_put_slice` (SDL descriptors) | ❌ | arrays degrade to quad placeholder; no slice API |
-| Array metadata (dimensions, bounds, element type; schema-aware on RDB 6) | ❌ | — |
-| `fbtype.ArrayCodec`, `Array[T]`, `FlatArray[T]`, multi-dimensional support, ragged guards | ❌ | — |
-| database/sql scanning/encoding of array slices (incl. `Map.SQLScanner`) | ❌ | — |
+| Array read/write via `op_get_slice`/`op_put_slice` (SDL descriptors) | ✅ | implemented 2026-09 (see ARRAY_MIGRATION_PLAN.md); wire layout verified against FB 2.5–5.0 |
+| Array metadata (dimensions, bounds, element type; schema-aware on RDB 6) | 🟡 | dimensions/bounds/element type resolved at prepare time; RDB 6 schema column deferred |
+| `fbtype.ArrayCodec`, `Array[T]`, `FlatArray[T]`, multi-dimensional support, ragged guards | 🟡 | `firebirdsql.FlatArray[T]` / `firebirdsql.Array[T]` (sql.Scanner + driver.Valuer) + ragged guards; no codec-map indirection (plain slices work as params via NamedValueChecker, but NOT as scan targets — database/sql conversion limitation) |
+| database/sql scanning/encoding of array slices (incl. `Map.SQLScanner`) | 🟡 | via the generic wrappers; plain-slice scan targets unsupported (see above) |
 | Array support in batch API | n/a | fbx rejects blob/array in batches too (server limitation) |
+| TIME_TZ / TIMESTAMP_TZ / INT128 / DECFLOAT array elements | ❌ | clear "not supported" error, planned follow-up |
 
 ## 9. Types
 
