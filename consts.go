@@ -767,3 +767,12 @@ const (
 	IsoSnapshotRO     = ISOLATION_LEVEL_REPEATABLE_READ_RO
 	IsoConsistencyRO  = ISOLATION_LEVEL_SERIALIZABLE_RO
 )
+
+// NumInternalIsolationLevels is the bound of the internal preset values used
+// by the encoded completion intents (Level*Base + iso).
+const NumInternalIsolationLevels = numInternalIsolationLevels
+
+// MaxLockTimeoutEnc is the largest lock-timeout seconds value representable
+// in the LevelLockTimeoutBase encoding (keeps the range below
+// LevelCommitRetainingBase).
+const MaxLockTimeoutEnc = maxLockTimeout
