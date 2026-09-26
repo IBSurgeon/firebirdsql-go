@@ -750,3 +750,20 @@ const (
 	ReplicaModeReadOnly  ReplicaMode = isc_spb_prp_rm_readonly
 	ReplicaModeReadWrite ReplicaMode = isc_spb_prp_rm_readwrite
 )
+
+// Exported aliases of the isolation presets so callers can compose the
+// encoded completion intents (e.g. LevelCommitRetainingBase + IsoRC) and
+// validate decoded scenarios.
+const (
+	IsoRCLegacy       = ISOLATION_LEVEL_READ_COMMITED_LEGACY      // RC, no_rec_version, wait
+	IsoRC             = ISOLATION_LEVEL_READ_COMMITED             // RC, rec_version, wait
+	IsoSnapshot       = ISOLATION_LEVEL_REPEATABLE_READ           // snapshot (concurrency), wait
+	IsoConsistency    = ISOLATION_LEVEL_SERIALIZABLE              // consistency, wait
+	IsoRCRO           = ISOLATION_LEVEL_READ_COMMITED_RO          // RC rec_version, read-only, wait
+	IsoRCNoWait       = ISOLATION_LEVEL_READ_COMMITED_NOWAIT      // RC rec_version, nowait
+	IsoRCRONoWait     = ISOLATION_LEVEL_READ_COMMITED_RO_NOWAIT   // RC RO, nowait
+	IsoRCLegacyNoWait = ISOLATION_LEVEL_READ_COMMITED_LEGACY_NOWAIT
+	IsoSnapshotNoWait = ISOLATION_LEVEL_REPEATABLE_READ_NOWAIT
+	IsoSnapshotRO     = ISOLATION_LEVEL_REPEATABLE_READ_RO
+	IsoConsistencyRO  = ISOLATION_LEVEL_SERIALIZABLE_RO
+)
