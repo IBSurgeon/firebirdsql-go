@@ -384,3 +384,23 @@ func TestLiveHardDropOpenTx(t *testing.T) {
 		return row.Scan(&n) == nil && n == 0
 	}, 10*time.Second, 200*time.Millisecond, "hard drop must not leave the uncommitted insert visible")
 }
+
+func TestIntentPreservesWaitAndRO(t *testing.T) {
+	// 5005 = commit retaining of ISOLATION_LEVEL_READ_COMMITED_NOWAIT: the
+	// TPB must stay NOWAIT (the intent must not degrade to infinite WAIT).
+	sc, ok := decodeDriverLevel(LevelCommitRetainingBase + ISOLATION_LEVEL_READ_COMMITED_NOWAIT)
+	require.True(t, ok)
+	require.Equal(t, completionCommitRetaining, sc.completion)
+	tpb, err := sc.tpbBytes()
+	require.NoError(t, err)
+	require.Equal(t, []byte{byte(isc_tpb_version3), byte(isc_tpb_write), byte(isc_tpb_nowait),
+		byte(isc_tpb_read_committed), byte(isc_tpb_rec_version)}, tpb)
+
+	// hard drop of the snapshot-RO preset keeps read-only
+	scHD, ok := decodeDriverLevel(LevelHardDropBase + ISOLATION_LEVEL_REPEATABLE_READ_RO)
+	require.True(t, ok)
+	require.True(t, scHD.ro)
+	tpbHD, err := scHD.tpbBytes()
+	require.NoError(t, err)
+	require.Equal(t, byte(isc_tpb_read), tpbHD[1])
+}

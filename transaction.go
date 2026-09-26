@@ -101,18 +101,22 @@ func decodeDriverLevel(level int) (txScenario, bool) {
 		return sc, true
 	case level >= LevelCommitRetainingBase && level < LevelCommitRetainingBase+numInternalIsolationLevels:
 		sc.isolation = level - LevelCommitRetainingBase
+		applyIsoSemantics(&sc)
 		sc.completion = completionCommitRetaining
 		return sc, true
 	case level >= LevelRollbackRetainingBase && level < LevelRollbackRetainingBase+numInternalIsolationLevels:
 		sc.isolation = level - LevelRollbackRetainingBase
+		applyIsoSemantics(&sc)
 		sc.completion = completionRollbackRetaining
 		return sc, true
 	case level >= LevelPrepareThenDieBase && level < LevelPrepareThenDieBase+numInternalIsolationLevels:
 		sc.isolation = level - LevelPrepareThenDieBase
+		applyIsoSemantics(&sc)
 		sc.completion = completionPrepareThenDie
 		return sc, true
 	case level >= LevelHardDropBase && level < LevelHardDropBase+numInternalIsolationLevels:
 		sc.isolation = level - LevelHardDropBase
+		applyIsoSemantics(&sc)
 		sc.completion = completionHardDrop
 		return sc, true
 	}
@@ -154,6 +158,24 @@ func decodeDriverLevel(level int) (txScenario, bool) {
 		return sc, false
 	}
 		return sc, true
+}
+
+// applyIsoSemantics carries the wait/read-only semantics of the internal
+// isolation constant into the scenario: the intent encodings select the
+// isolation by constant, and without this step a NOWAIT constant
+// (e.g. ISOLATION_LEVEL_READ_COMMITED_NOWAIT in 5005) would materialize as
+// an infinite-WAIT transaction.
+func applyIsoSemantics(sc *txScenario) {
+	switch sc.isolation {
+	case ISOLATION_LEVEL_READ_COMMITED_NOWAIT, ISOLATION_LEVEL_READ_COMMITED_RO_NOWAIT,
+		ISOLATION_LEVEL_READ_COMMITED_LEGACY_NOWAIT, ISOLATION_LEVEL_REPEATABLE_READ_NOWAIT:
+		sc.waitMode = isc_tpb_nowait
+	}
+	switch sc.isolation {
+	case ISOLATION_LEVEL_READ_COMMITED_RO, ISOLATION_LEVEL_READ_COMMITED_RO_NOWAIT,
+		ISOLATION_LEVEL_REPEATABLE_READ_RO, ISOLATION_LEVEL_SERIALIZABLE_RO:
+		sc.ro = true
+	}
 }
 
 // tpbBytes materializes the scenario into a TPB. Element order mirrors the
