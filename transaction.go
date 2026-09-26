@@ -97,44 +97,51 @@ func decodeDriverLevel(level int) (txScenario, bool) {
 		return sc, true
 	}
 	switch level {
-	case 0, 1: // sql.LevelDefault / LevelReadCommitted / ISOLATION_LEVEL_READ_COMMITED
+	// Plain values decode as the union of sql.Level* and the internal
+	// ISOLATION_LEVEL_* constants. Collisions are resolved to keep the
+	// historical BeginTx behavior of the sql.Level* values:
+	//   0: LevelDefault / LEGACY            -> RC (rec_version)  [old: RC]
+	//   1: LevelReadUncommitted / RC        -> RC                [old: error]
+	//   2: LevelReadCommitted / REPEATABLE  -> RC                [old: RC]
+	//   3: LevelWriteCommitted / SERIALIZABLE -> consistency     [old: error]
+	//   4: LevelRepeatableRead / RC_RO      -> snapshot          [old: snapshot]
+	//   5: LevelSnapshot / RC_NOWAIT        -> RC nowait         [old: error]
+	//   6: LevelSerializable / RC_RO_NOWAIT -> consistency       [old: consistency]
+	//   7..10: new presets (LEGACY_NOWAIT, REPEATABLE_READ_NOWAIT,
+	//          REPEATABLE_READ_RO, SERIALIZABLE_RO)
+	case 0, 1, 2:
 		sc.isolation = ISOLATION_LEVEL_READ_COMMITED
-	case 3: // sql.LevelRepeatableRead / ISOLATION_LEVEL_REPEATABLE_READ
-		sc.isolation = ISOLATION_LEVEL_REPEATABLE_READ
-	case 4: // sql.LevelSerializable / ISOLATION_LEVEL_SERIALIZABLE
+	case 3, 6:
 		sc.isolation = ISOLATION_LEVEL_SERIALIZABLE
-	case 5: // ISOLATION_LEVEL_READ_COMMITED_NOWAIT (sql.LevelLinearizable value reused)
-		sc.isolation = ISOLATION_LEVEL_READ_COMMITED
+	case 4:
+		sc.isolation = ISOLATION_LEVEL_REPEATABLE_READ
+	case 5:
+		sc.isolation = ISOLATION_LEVEL_READ_COMMITED_NOWAIT
 		sc.waitMode = isc_tpb_nowait
-	case 6: // ISOLATION_LEVEL_READ_COMMITED_RO_NOWAIT
-		sc.isolation = ISOLATION_LEVEL_READ_COMMITED
+	case 7:
+		sc.isolation = ISOLATION_LEVEL_READ_COMMITED_LEGACY_NOWAIT
+		sc.waitMode = isc_tpb_nowait
+	case 8:
+		sc.isolation = ISOLATION_LEVEL_REPEATABLE_READ_NOWAIT
+		sc.waitMode = isc_tpb_nowait
+	case 9:
+		sc.isolation = ISOLATION_LEVEL_REPEATABLE_READ_RO
 		sc.ro = true
-		sc.waitMode = isc_tpb_nowait
+	case 10:
+		sc.isolation = ISOLATION_LEVEL_SERIALIZABLE_RO
+		sc.ro = true
 	default:
 		return sc, false
 	}
-	return sc, true
+		return sc, true
 }
 
-// tpbBytes materializes the scenario into a TPB. isc_tpb_lock_timeout is
-// encoded length-prefixed little-endian (VAX) per tra.cpp; it conflicts with
-// isc_tpb_nowait server-side, so it implies WAIT.
+// tpbBytes materializes the scenario into a TPB. Element order mirrors the
+// legacy presets (version3, access mode, wait group, isolation cluster).
+// isc_tpb_lock_timeout is encoded length-prefixed little-endian (VAX) per
+// tra.cpp; it conflicts with isc_tpb_nowait server-side, so it implies WAIT.
 func (sc txScenario) tpbBytes() ([]byte, error) {
 	tpb := []byte{isc_tpb_version3}
-	switch sc.isolation {
-	case ISOLATION_LEVEL_READ_COMMITED, ISOLATION_LEVEL_READ_COMMITED_NOWAIT,
-		ISOLATION_LEVEL_READ_COMMITED_RO, ISOLATION_LEVEL_READ_COMMITED_RO_NOWAIT:
-		tpb = append(tpb, isc_tpb_read_committed, isc_tpb_rec_version)
-	case ISOLATION_LEVEL_READ_COMMITED_LEGACY, ISOLATION_LEVEL_READ_COMMITED_LEGACY_NOWAIT:
-		tpb = append(tpb, isc_tpb_read_committed, isc_tpb_no_rec_version)
-	case ISOLATION_LEVEL_REPEATABLE_READ, ISOLATION_LEVEL_REPEATABLE_READ_NOWAIT,
-		ISOLATION_LEVEL_REPEATABLE_READ_RO:
-		tpb = append(tpb, isc_tpb_concurrency)
-	case ISOLATION_LEVEL_SERIALIZABLE, ISOLATION_LEVEL_SERIALIZABLE_RO:
-		tpb = append(tpb, isc_tpb_consistency)
-	default:
-		return nil, ErrInvalidIsolationLevel
-	}
 	if sc.ro {
 		tpb = append(tpb, isc_tpb_read)
 	} else {
@@ -148,6 +155,20 @@ func (sc txScenario) tpbBytes() ([]byte, error) {
 		tpb = append(tpb, isc_tpb_nowait)
 	default:
 		tpb = append(tpb, isc_tpb_wait)
+	}
+	switch sc.isolation {
+	case ISOLATION_LEVEL_READ_COMMITED, ISOLATION_LEVEL_READ_COMMITED_NOWAIT,
+		ISOLATION_LEVEL_READ_COMMITED_RO, ISOLATION_LEVEL_READ_COMMITED_RO_NOWAIT:
+		tpb = append(tpb, isc_tpb_read_committed, isc_tpb_rec_version)
+	case ISOLATION_LEVEL_READ_COMMITED_LEGACY, ISOLATION_LEVEL_READ_COMMITED_LEGACY_NOWAIT:
+		tpb = append(tpb, isc_tpb_read_committed, isc_tpb_no_rec_version)
+	case ISOLATION_LEVEL_REPEATABLE_READ, ISOLATION_LEVEL_REPEATABLE_READ_NOWAIT,
+		ISOLATION_LEVEL_REPEATABLE_READ_RO:
+		tpb = append(tpb, isc_tpb_concurrency)
+	case ISOLATION_LEVEL_SERIALIZABLE, ISOLATION_LEVEL_SERIALIZABLE_RO:
+		tpb = append(tpb, isc_tpb_consistency)
+	default:
+		return nil, ErrInvalidIsolationLevel
 	}
 	return tpb, nil
 }

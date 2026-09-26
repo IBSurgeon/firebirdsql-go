@@ -133,7 +133,11 @@ func (fc *firebirdsqlConn) beginScenario(sc txScenario) (driver.Tx, error) {
 	}
 	if t := fc.tx; t != nil && !t.needBegin && t.retained {
 		if bytes.Equal(tpb, t.tpb) {
+			t.isolationLevel = sc.isolation
 			t.completion = sc.completion
+			// the retained context becomes an explicit transaction again:
+			// never let the autocommit teardown commit it behind the caller's back
+			t.isAutocommit = false
 			return driver.Tx(t), nil
 		}
 		// Requested parameters differ from the retained context: end it, start fresh.

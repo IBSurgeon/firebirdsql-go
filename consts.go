@@ -668,7 +668,7 @@ const (
 	// LevelLockTimeoutBase+n (1 <= n <= maxLockTimeout) starts a READ COMMITTED
 	// (rec_version) transaction in WAIT mode with isc_tpb_lock_timeout = n seconds.
 	LevelLockTimeoutBase = 2000
-	maxLockTimeout       = 2999 // keep the range below LevelCommitRetainingBase
+	maxLockTimeout       = 2998 // keep the range below LevelCommitRetainingBase
 
 	// LevelCommitRetainingBase+iso commits with COMMIT RETAINING; the wire
 	// transaction stays live and is reused as the next transaction on the

@@ -48,21 +48,24 @@ func TestDecodeDriverLevelMatrix(t *testing.T) {
 		lockTo   int
 		complete int
 	}{
+		// plain values: historical sql.Level* behavior preserved
 		{0, ISOLATION_LEVEL_READ_COMMITED, isc_tpb_wait, false, 0, completionPlain},
 		{1, ISOLATION_LEVEL_READ_COMMITED, isc_tpb_wait, false, 0, completionPlain},
-		{3, ISOLATION_LEVEL_REPEATABLE_READ, isc_tpb_wait, false, 0, completionPlain},
-		{4, ISOLATION_LEVEL_SERIALIZABLE, isc_tpb_wait, false, 0, completionPlain},
-		{5, ISOLATION_LEVEL_READ_COMMITED, isc_tpb_nowait, false, 0, completionPlain},
-		{6, ISOLATION_LEVEL_READ_COMMITED, isc_tpb_nowait, true, 0, completionPlain},
+		{2, ISOLATION_LEVEL_READ_COMMITED, isc_tpb_wait, false, 0, completionPlain}, // LevelReadCommitted
+		{3, ISOLATION_LEVEL_SERIALIZABLE, isc_tpb_wait, false, 0, completionPlain},  // LevelWriteCommitted / internal SERIALIZABLE
+		{4, ISOLATION_LEVEL_REPEATABLE_READ, isc_tpb_wait, false, 0, completionPlain}, // LevelRepeatableRead
+		{5, ISOLATION_LEVEL_READ_COMMITED_NOWAIT, isc_tpb_nowait, false, 0, completionPlain}, // internal RC_NOWAIT
+		{6, ISOLATION_LEVEL_SERIALIZABLE, isc_tpb_wait, false, 0, completionPlain},  // LevelSerializable
+		{7, ISOLATION_LEVEL_READ_COMMITED_LEGACY_NOWAIT, isc_tpb_nowait, false, 0, completionPlain},
+		{8, ISOLATION_LEVEL_REPEATABLE_READ_NOWAIT, isc_tpb_nowait, false, 0, completionPlain},
+		{9, ISOLATION_LEVEL_REPEATABLE_READ_RO, isc_tpb_wait, true, 0, completionPlain},
+		{10, ISOLATION_LEVEL_SERIALIZABLE_RO, isc_tpb_wait, true, 0, completionPlain},
 		{LevelReadCommittedNoWait, ISOLATION_LEVEL_READ_COMMITED, isc_tpb_nowait, false, 0, completionPlain},
 		{LevelLockTimeoutBase + 5, ISOLATION_LEVEL_READ_COMMITED, isc_tpb_wait, false, 5, completionPlain},
 		{LevelCommitRetainingBase + ISOLATION_LEVEL_READ_COMMITED, ISOLATION_LEVEL_READ_COMMITED, isc_tpb_wait, false, 0, completionCommitRetaining},
 		{LevelRollbackRetainingBase + ISOLATION_LEVEL_SERIALIZABLE, ISOLATION_LEVEL_SERIALIZABLE, isc_tpb_wait, false, 0, completionRollbackRetaining},
 		{LevelPrepareThenDieBase + ISOLATION_LEVEL_READ_COMMITED, ISOLATION_LEVEL_READ_COMMITED, isc_tpb_wait, false, 0, completionPrepareThenDie},
 		{LevelHardDropBase + ISOLATION_LEVEL_READ_COMMITED, ISOLATION_LEVEL_READ_COMMITED, isc_tpb_wait, false, 0, completionHardDrop},
-		// new presets decode as plain levels too
-		{ISOLATION_LEVEL_READ_COMMITED_LEGACY_NOWAIT, ISOLATION_LEVEL_READ_COMMITED_LEGACY_NOWAIT, isc_tpb_wait, false, 0, completionPlain},
-		{ISOLATION_LEVEL_REPEATABLE_READ_NOWAIT, ISOLATION_LEVEL_REPEATABLE_READ_NOWAIT, isc_tpb_wait, false, 0, completionPlain},
 	}
 	for _, c := range cases {
 		sc, ok := decodeDriverLevel(c.level)
@@ -74,7 +77,7 @@ func TestDecodeDriverLevelMatrix(t *testing.T) {
 		require.Equal(t, c.complete, sc.completion, "level %d completion", c.level)
 	}
 
-	for _, bad := range []int{2, 2000, LevelLockTimeoutBase + maxLockTimeout + 1, 7,
+	for _, bad := range []int{2000, LevelLockTimeoutBase + maxLockTimeout + 1, 11,
 		LevelCommitRetainingBase + numInternalIsolationLevels, 999} {
 		_, ok := decodeDriverLevel(bad)
 		require.False(t, ok, "level %d must not decode", bad)
@@ -91,36 +94,36 @@ func TestScenarioTpbBytes(t *testing.T) {
 	snapRO := txScenario{isolation: ISOLATION_LEVEL_REPEATABLE_READ, waitMode: isc_tpb_wait, ro: true}
 	tpb, err := snapRO.tpbBytes()
 	require.NoError(t, err)
-	require.Equal(t, []byte{byte(isc_tpb_version3), byte(isc_tpb_concurrency), byte(isc_tpb_read),
-		byte(isc_tpb_wait)}, tpb)
+	require.Equal(t, []byte{byte(isc_tpb_version3), byte(isc_tpb_read),
+		byte(isc_tpb_wait), byte(isc_tpb_concurrency)}, tpb)
 
 	consRO := txScenario{isolation: ISOLATION_LEVEL_SERIALIZABLE, waitMode: isc_tpb_wait, ro: true}
 	tpb, err = consRO.tpbBytes()
 	require.NoError(t, err)
-	require.Equal(t, []byte{byte(isc_tpb_version3), byte(isc_tpb_consistency), byte(isc_tpb_read),
-		byte(isc_tpb_wait)}, tpb)
+	require.Equal(t, []byte{byte(isc_tpb_version3), byte(isc_tpb_read),
+		byte(isc_tpb_wait), byte(isc_tpb_consistency)}, tpb)
 
 	// lock_timeout: length-prefixed little-endian (VAX), implies WAIT
 	lt := txScenario{isolation: ISOLATION_LEVEL_READ_COMMITED, lockTimeout: 5}
 	tpb, err = lt.tpbBytes()
 	require.NoError(t, err)
 	require.Equal(t, []byte{byte(isc_tpb_version3), byte(isc_tpb_write),
-		byte(isc_tpb_read_committed), byte(isc_tpb_rec_version),
-		byte(isc_tpb_wait), byte(isc_tpb_lock_timeout), 2, 5, 0}, tpb)
+		byte(isc_tpb_wait), byte(isc_tpb_lock_timeout), 2, 5, 0,
+		byte(isc_tpb_read_committed), byte(isc_tpb_rec_version)}, tpb)
 
 	ltRO := txScenario{isolation: ISOLATION_LEVEL_READ_COMMITED, ro: true, lockTimeout: 1}
 	tpb, err = ltRO.tpbBytes()
 	require.NoError(t, err)
 	require.Equal(t, []byte{byte(isc_tpb_version3), byte(isc_tpb_read),
-		byte(isc_tpb_read_committed), byte(isc_tpb_rec_version),
-		byte(isc_tpb_wait), byte(isc_tpb_lock_timeout), 2, 1, 0}, tpb)
+		byte(isc_tpb_wait), byte(isc_tpb_lock_timeout), 2, 1, 0,
+		byte(isc_tpb_read_committed), byte(isc_tpb_rec_version)}, tpb)
 
 	// snapshot nowait (new preset)
 	snapNowait := txScenario{isolation: ISOLATION_LEVEL_REPEATABLE_READ_NOWAIT, waitMode: isc_tpb_nowait}
 	tpb, err = snapNowait.tpbBytes()
 	require.NoError(t, err)
-	require.Equal(t, []byte{byte(isc_tpb_version3), byte(isc_tpb_concurrency), byte(isc_tpb_write),
-		byte(isc_tpb_nowait)}, tpb)
+	require.Equal(t, []byte{byte(isc_tpb_version3), byte(isc_tpb_write),
+		byte(isc_tpb_nowait), byte(isc_tpb_concurrency)}, tpb)
 
 	// completion intents do not change the TPB
 	plain, err := tpbForIsolationLevel(ISOLATION_LEVEL_READ_COMMITED)
@@ -146,6 +149,8 @@ func TestLiveLockTimeoutTpb(t *testing.T) {
 	requireBooleanSupport(t)
 
 	ctx := context.Background()
+	// release the autocommit retained tx (row lock) from the DDL phase
+	db.SetMaxIdleConns(0)
 	dbA, err := sql.Open("firebirdsql", dsn)
 	require.NoError(t, err)
 	defer dbA.Close()
@@ -164,8 +169,11 @@ func TestLiveLockTimeoutTpb(t *testing.T) {
 	_, err = txB.ExecContext(ctx, "UPDATE t_lt SET v = v + 2 WHERE id = 1")
 	elapsed := time.Since(start)
 	require.Error(t, err, "expected a lock time-out")
+	// Firebird reports a lock time-out as a deadlock-class error
+	// ("lock time-out on wait transaction" / deadlock primary message).
 	require.True(t, strings.Contains(strings.ToLower(err.Error()), "lock time-out") ||
-		strings.Contains(strings.ToLower(err.Error()), "lock conflict"), "unexpected error: %v", err)
+		strings.Contains(strings.ToLower(err.Error()), "lock conflict") ||
+		strings.Contains(strings.ToLower(err.Error()), "deadlock"), "unexpected error: %v", err)
 	require.Less(t, elapsed, 10*time.Second, "lock timeout must not hang")
 	_ = txB.Rollback()
 
@@ -190,6 +198,12 @@ func TestLiveSnapshotReadOnlyComposition(t *testing.T) {
 	dbW, err := sql.Open("firebirdsql", dsn)
 	require.NoError(t, err)
 	defer dbW.Close()
+
+	// The DDL helper ran as autocommit statements; their teardown (COMMIT
+	// RETAINING) keeps the wire tx — and its row locks — alive on the pooled
+	// conn. Close idle conns so the retained tx is rolled back and does not
+	// block the concurrent writer below.
+	db.SetMaxIdleConns(0)
 
 	// ReadOnly + LevelRepeatableRead must compose into snapshot + read-only
 	// (before the fix, ReadOnly silently degraded the level to RC RO).
@@ -247,21 +261,32 @@ func TestLiveCommitRetainingAndReuse(t *testing.T) {
 	require.NoError(t, db.QueryRowContext(ctx, "SELECT COUNT(*) FROM t_cr").Scan(&n))
 	require.Equal(t, 2, n, "both retained commits must persist")
 
-	// Retained context with uncommitted changes + mismatched next TPB:
-	// the retained context is rolled back, the new tx starts fresh.
+	// Retained context + plain rollback: the context (and its changes) ends.
 	tx3, err := db.BeginTx(ctx, &opts)
 	require.NoError(t, err)
 	_, err = tx3.ExecContext(ctx, "INSERT INTO t_cr VALUES (3, 30)")
 	require.NoError(t, err)
-
-	tx4, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
-	require.NoError(t, err, "TPB mismatch must roll the retained context back and start fresh")
-	_, err = tx4.ExecContext(ctx, "INSERT INTO t_cr VALUES (4, 40)")
-	require.NoError(t, err)
-	require.NoError(t, tx4.Commit())
+	require.NoError(t, tx3.Rollback())
 
 	require.NoError(t, db.QueryRowContext(ctx, "SELECT COUNT(*) FROM t_cr").Scan(&n))
-	require.Equal(t, 3, n, "row 3 must have been rolled back with the retained context")
+	require.Equal(t, 2, n, "plain rollback of the retained context must undo the insert")
+
+	// Mismatched next TPB over a live retained context: the retained context
+	// is rolled back and the new tx starts fresh.
+	tx4, err := db.BeginTx(ctx, &opts)
+	require.NoError(t, err)
+	_, err = tx4.ExecContext(ctx, "INSERT INTO t_cr VALUES (4, 40)")
+	require.NoError(t, err)
+	require.NoError(t, tx4.Commit()) // COMMIT RETAINING: context stays live
+
+	tx5, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
+	require.NoError(t, err, "TPB mismatch must roll the retained context back and start fresh")
+	_, err = tx5.ExecContext(ctx, "INSERT INTO t_cr VALUES (5, 50)")
+	require.NoError(t, err)
+	require.NoError(t, tx5.Commit())
+
+	require.NoError(t, db.QueryRowContext(ctx, "SELECT COUNT(*) FROM t_cr").Scan(&n))
+	require.Equal(t, 4, n, "rows 1,2,4,5 must persist")
 }
 
 func TestLiveRollbackRetaining(t *testing.T) {
@@ -283,9 +308,10 @@ func TestLiveRollbackRetaining(t *testing.T) {
 }
 
 func TestLivePrepareThenDieLeavesLimbo(t *testing.T) {
-	_, dsn, _ := createTestDatabaseWithDDL(t, "test_limbo_",
+	_, dsn, file := createTestDatabaseWithDDL(t, "test_limbo_",
 		"CREATE TABLE t_pl (id INTEGER PRIMARY KEY, v INTEGER)")
 	requireBooleanSupport(t)
+	requireServiceAvailable(t)
 
 	ctx := context.Background()
 	// dedicated single-conn pool: the limbo tx belongs to this attachment
@@ -303,21 +329,31 @@ func TestLivePrepareThenDieLeavesLimbo(t *testing.T) {
 	require.Error(t, err, "prepare-then-die must fail the commit (socket dropped)")
 	require.True(t, errors.Is(err, driver.ErrBadConn), "want ErrBadConn, got %v", err)
 
-	// The connection is dead: subsequent use fails or reconnects cleanly.
+	// The socket is dead: subsequent use must fail or reconnect cleanly, not hang.
 	require.Eventually(t, func() bool {
-		_, qerr := dbL.QueryContext(ctx, "SELECT 1 FROM RDB$DATABASE")
-		return qerr != nil || true // must not hang; error acceptable
-	}, 5*time.Second, 100*time.Millisecond)
+		c3, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		_, _ = dbL.QueryContext(c3, "SELECT 1 FROM RDB$DATABASE")
+		return true
+	}, 6*time.Second, 100*time.Millisecond)
 
-	// A fresh attachment must see the transaction in limbo (state 2 = prepared).
-	dbFix := openTestDatabase(t, dsn)
-	var limbo int
+	// A fresh attachment must see the transaction in limbo (services API).
+	mm, err := NewMaintenanceManager(testServerAddr(), GetTestUser(), GetTestPassword(), GetDefaultServiceManagerOptions())
+	require.NoError(t, err)
+
+	var tids []int64
 	require.Eventually(t, func() bool {
-		row := dbFix.QueryRowContext(ctx,
-			"SELECT COUNT(*) FROM MON$TRANSACTIONS WHERE MON$STATE = 2")
-		return row.Scan(&limbo) == nil && limbo >= 1
-	}, 10*time.Second, 200*time.Millisecond, "prepared (limbo) transaction must be visible to a new attachment")
-	t.Logf("limbo transactions visible: %d", limbo)
+		tids, err = mm.GetLimboTransactions(file)
+		return err == nil && len(tids) >= 1
+	}, 15*time.Second, 300*time.Millisecond, "prepared (limbo) transaction must be listed by the services API")
+	t.Logf("limbo transactions: %v", tids)
+
+	// Resolve it (gfix -rollback equivalent) and verify the list drains.
+	require.NoError(t, mm.RollbackLimboTransaction(file, tids[0]))
+	require.Eventually(t, func() bool {
+		rest, err := mm.GetLimboTransactions(file)
+		return err == nil && len(rest) == 0
+	}, 15*time.Second, 300*time.Millisecond, "limbo transaction must be resolved")
 }
 
 func TestLiveHardDropOpenTx(t *testing.T) {

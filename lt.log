@@ -1,0 +1,100 @@
+=== RUN   TestLiveLockTimeoutTpb
+--- PASS: TestLiveLockTimeoutTpb (1.89s)
+=== RUN   TestLiveSnapshotReadOnlyComposition
+panic: test timed out after 2m0s
+	running tests:
+		TestLiveSnapshotReadOnlyComposition (1m58s)
+
+goroutine 56 [running]:
+testing.(*M).startAlarm.func1()
+	C:/Program Files/Go/src/testing/testing.go:2484 +0x394
+created by time.goFunc
+	C:/Program Files/Go/src/time/sleep.go:215 +0x2d
+
+goroutine 1 [chan receive]:
+testing.(*T).Run(0xc000003880, {0xb1aa24?, 0x7ffd2c9427c0?}, 0xb4c508)
+	C:/Program Files/Go/src/testing/testing.go:1859 +0x414
+testing.runTests.func1(0xc000003880)
+	C:/Program Files/Go/src/testing/testing.go:2279 +0x37
+testing.tRunner(0xc000003880, 0xc0000dbc70)
+	C:/Program Files/Go/src/testing/testing.go:1792 +0xcb
+testing.runTests(0xc000008228, {0xed6520, 0x133, 0x133}, {0xedb1a0?, 0x7?, 0xeda020?})
+	C:/Program Files/Go/src/testing/testing.go:2277 +0x4b4
+testing.(*M).Run(0xc00007ef00)
+	C:/Program Files/Go/src/testing/testing.go:2142 +0x64a
+main.main()
+	_testmain.go:677 +0x9b
+
+goroutine 72 [IO wait]:
+internal/poll.runtime_pollWait(0x184ceeb0df8, 0x72)
+	C:/Program Files/Go/src/runtime/netpoll.go:351 +0x85
+internal/poll.(*pollDesc).wait(0xc000003c00?, 0x300000002?, 0x0)
+	C:/Program Files/Go/src/internal/poll/fd_poll_runtime.go:84 +0x27
+internal/poll.execIO(0xc0004a82a0, 0xb4d378)
+	C:/Program Files/Go/src/internal/poll/fd_windows.go:177 +0x105
+internal/poll.(*FD).Read(0xc0004a8288, {0xc0004e4000, 0x1000, 0x1000})
+	C:/Program Files/Go/src/internal/poll/fd_windows.go:438 +0x29b
+net.(*netFD).Read(0xc0004a8288, {0xc0004e4000?, 0x8?, 0xc0000356a8?})
+	C:/Program Files/Go/src/net/fd_posix.go:55 +0x25
+net.(*conn).Read(0xc0004b0028, {0xc0004e4000?, 0x4?, 0xa82940?})
+	C:/Program Files/Go/src/net/net.go:194 +0x45
+bufio.(*Reader).Read(0xc00042e2a0, {0xc0004ea294, 0x4, 0xc000035718?})
+	C:/Program Files/Go/src/bufio/bufio.go:245 +0x197
+github.com/nakagami/firebirdsql.(*wireChannel).Read(0xc0004de018, {0xc0004ea290, 0x4, 0x4})
+	E:/Projects_2026/firebirdsql/wirechannel.go:108 +0x7b
+github.com/nakagami/firebirdsql.(*wireProtocol).recvPackets(0xc0004de000, 0x4)
+	E:/Projects_2026/firebirdsql/wireprotocol.go:279 +0xb3
+github.com/nakagami/firebirdsql.(*wireProtocol).opResponse(0xc0004de000)
+	E:/Projects_2026/firebirdsql/wireprotocol.go:1940 +0x3e
+github.com/nakagami/firebirdsql.(*firebirdsqlStmt).exec.func1()
+	E:/Projects_2026/firebirdsql/statement.go:203 +0x1d
+github.com/nakagami/firebirdsql.(*firebirdsqlStmt).withCancelWatcher(0xc00003c480, {0xbbbae8, 0xf222c0}, 0xc0000358f8)
+	E:/Projects_2026/firebirdsql/statement.go:106 +0x122
+github.com/nakagami/firebirdsql.(*firebirdsqlStmt).exec(0xa9bf80?, {0xbbbae8, 0xf222c0}, {0xf222c0, 0x0, 0x0})
+	E:/Projects_2026/firebirdsql/statement.go:202 +0x1de
+github.com/nakagami/firebirdsql.(*firebirdsqlConn).exec(0x0?, {0xbbbae8, 0xf222c0}, {0xb1c8a5?, 0x4?}, {0xf222c0, 0x0, 0x0})
+	E:/Projects_2026/firebirdsql/connection.go:228 +0xd5
+github.com/nakagami/firebirdsql.(*firebirdsqlConn).ExecContext(0xc0004b4140, {0xbbbae8, 0xf222c0}, {0xb1c8a5, 0x24}, {0xf222c0, 0x0, 0x5?})
+	E:/Projects_2026/firebirdsql/driver_go18.go:73 +0x105
+database/sql.ctxDriverExec({0xbbbae8?, 0xf222c0?}, {0x184ceeb2898?, 0xc0004b4140?}, {0x0?, 0x0?}, {0xb1c8a5?, 0xae9f00?}, {0xf222c0, 0x0, ...})
+	C:/Program Files/Go/src/database/sql/ctxutil.go:31 +0xd7
+database/sql.(*DB).execDC.func2()
+	C:/Program Files/Go/src/database/sql/sql.go:1713 +0x159
+database/sql.withLock({0xbba288, 0xc00003c380}, 0xc000035d30)
+	C:/Program Files/Go/src/database/sql/sql.go:3574 +0x71
+database/sql.(*DB).execDC(0xbb8ca0?, {0xbbbae8, 0xf222c0}, 0xc00003c380, 0x0?, {0xb1c8a5, 0x24}, {0x0, 0x0, 0x0})
+	C:/Program Files/Go/src/database/sql/sql.go:1708 +0x216
+database/sql.(*Tx).ExecContext(0xc00003c400, {0xbbbae8, 0xf222c0}, {0xb1c8a5, 0x24}, {0x0, 0x0, 0x0})
+	C:/Program Files/Go/src/database/sql/sql.go:2516 +0xad
+github.com/nakagami/firebirdsql.TestLiveSnapshotReadOnlyComposition(0xc000108700)
+	E:/Projects_2026/firebirdsql/extended_intents_test.go:224 +0x389
+testing.tRunner(0xc000108700, 0xb4c508)
+	C:/Program Files/Go/src/testing/testing.go:1792 +0xcb
+created by testing.(*T).Run in goroutine 1
+	C:/Program Files/Go/src/testing/testing.go:1851 +0x3f6
+
+goroutine 55 [chan receive]:
+database/sql.(*Tx).awaitDone(0xc00003c400)
+	C:/Program Files/Go/src/database/sql/sql.go:2212 +0x29
+created by database/sql.(*DB).beginDC in goroutine 72
+	C:/Program Files/Go/src/database/sql/sql.go:1925 +0x1ef
+
+goroutine 77 [select]:
+database/sql.(*DB).connectionOpener(0xc000428b60, {0xbbbd50, 0xc00045c910})
+	C:/Program Files/Go/src/database/sql/sql.go:1261 +0x87
+created by database/sql.OpenDB in goroutine 72
+	C:/Program Files/Go/src/database/sql/sql.go:841 +0x130
+
+goroutine 82 [select]:
+database/sql.(*DB).connectionOpener(0xc000428f70, {0xbbbd50, 0xc00045cb40})
+	C:/Program Files/Go/src/database/sql/sql.go:1261 +0x87
+created by database/sql.OpenDB in goroutine 72
+	C:/Program Files/Go/src/database/sql/sql.go:841 +0x130
+
+goroutine 86 [chan receive]:
+database/sql.(*Tx).awaitDone(0xc0001a6580)
+	C:/Program Files/Go/src/database/sql/sql.go:2212 +0x29
+created by database/sql.(*DB).beginDC in goroutine 72
+	C:/Program Files/Go/src/database/sql/sql.go:1925 +0x1ef
+FAIL	github.com/nakagami/firebirdsql	122.062s
+FAIL

@@ -180,6 +180,34 @@ func (mm *MaintenanceManager) Validate(database string, options int) error {
 	return mm.attach(spb.Bytes(), nil)
 }
 
+// resolveLimbo runs one isc_spb_rpr_*_trans_64 repair action for a single
+// limbo transaction id (commit / rollback / two-phase recovery).
+func (mm *MaintenanceManager) resolveLimbo(database string, action int, traID int64) error {
+	spb := NewXPBWriterFromTag(isc_action_svc_repair)
+	spb.PutString(isc_spb_dbname, database)
+	// The transaction id travels in the action clump itself (isc_spb_rpr_*_trans_64).
+	spb.PutInt64(byte(action), traID)
+	return mm.attach(spb.Bytes(), nil)
+}
+
+// CommitLimboTransaction commits the prepared limbo transaction traID
+// (gfix -commit).
+func (mm *MaintenanceManager) CommitLimboTransaction(database string, traID int64) error {
+	return mm.resolveLimbo(database, isc_spb_rpr_commit_trans_64, traID)
+}
+
+// RollbackLimboTransaction rolls the prepared limbo transaction traID back
+// (gfix -rollback).
+func (mm *MaintenanceManager) RollbackLimboTransaction(database string, traID int64) error {
+	return mm.resolveLimbo(database, isc_spb_rpr_rollback_trans_64, traID)
+}
+
+// TwoPhaseRecovery resolves the limbo transaction traID with the standard
+// two-phase recovery algorithm (gfix -two_phase).
+func (mm *MaintenanceManager) TwoPhaseRecovery(database string, traID int64) error {
+	return mm.resolveLimbo(database, isc_spb_rpr_recover_two_phase_64, traID)
+}
+
 func (mm *MaintenanceManager) GetLimboTransactions(database string) ([]int64, error) {
 	var (
 		err     error
