@@ -1386,6 +1386,16 @@ func (p *wireProtocol) opRollback(transHandle int32) error {
 	return err
 }
 
+// opPrepare is the first phase of a two-phase commit (isc_prepare_transaction):
+// the transaction enters the limbo state until a resolution arrives.
+func (p *wireProtocol) opPrepare(transHandle int32) error {
+	p.debugPrint("opPrepare():%d", transHandle)
+	p.packInt(op_prepare)
+	p.packInt(transHandle)
+	_, err := p.sendPackets()
+	return err
+}
+
 func (p *wireProtocol) opRollbackRetaining(transHandle int32) error {
 	p.debugPrint("opRollbackRetaining():%d", transHandle)
 	p.packInt(op_rollback_retaining)

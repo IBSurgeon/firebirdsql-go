@@ -23,12 +23,133 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 package firebirdsql
 
+import (
+	"database/sql/driver"
+	"fmt"
+)
+
+// Completion intents, encoded in the begin-time IsolationLevel (see consts.go):
+// database/sql passes no arguments to Tx.Commit()/Rollback(), so the intended
+// completion method must be signaled when the transaction starts.
+const (
+	completionPlain = iota
+	completionCommitRetaining
+	completionRollbackRetaining
+	completionPrepareThenDie
+	completionHardDrop
+)
+
+// txScenario is a decoded IsolationLevel: everything needed to materialize a
+// TPB and to decide how the transaction completes.
+type txScenario struct {
+	isolation   int  // ISOLATION_LEVEL_* equivalent base
+	waitMode    int  // isc_tpb_wait | isc_tpb_nowait
+	lockTimeout int  // seconds; >0 forces WAIT and excludes isc_tpb_nowait
+	ro          bool
+	completion  int
+}
+
 type firebirdsqlTx struct {
 	fc             *firebirdsqlConn
 	isolationLevel int
 	isAutocommit   bool
 	transHandle    int32
 	needBegin      bool
+	tpb            []byte // TPB this wire transaction was started with
+	completion     int    // pending completion intent (consumed by Commit/Rollback)
+	retained       bool   // a retaining completion left this wire tx live as the next transaction
+	plannedDrop    bool   // hard-drop / prepare-then-die: teardown loops must skip this tx
+}
+
+// decodeDriverLevel decodes a database/sql IsolationLevel (possibly carrying a
+// driver-specific encoding, see consts.go) into a txScenario. Plain values
+// decode as the historical numeric union of sql.Level* and the internal
+// ISOLATION_LEVEL_* constants (LevelDefault/LevelReadCommitted and
+// ISOLATION_LEVEL_READ_COMMITED share values 0/1 and both map to READ
+// COMMITTED rec_version; 4 is both LevelSerializable and
+// ISOLATION_LEVEL_SERIALIZABLE).
+func decodeDriverLevel(level int) (txScenario, bool) {
+	sc := txScenario{completion: completionPlain, waitMode: isc_tpb_wait}
+	switch {
+	case level == LevelReadCommittedNoWait:
+		sc.isolation = ISOLATION_LEVEL_READ_COMMITED
+		sc.waitMode = isc_tpb_nowait
+		return sc, true
+	case level > LevelLockTimeoutBase && level <= LevelLockTimeoutBase+maxLockTimeout:
+		sc.isolation = ISOLATION_LEVEL_READ_COMMITED
+		sc.lockTimeout = level - LevelLockTimeoutBase
+		return sc, true
+	case level >= LevelCommitRetainingBase && level < LevelCommitRetainingBase+numInternalIsolationLevels:
+		sc.isolation = level - LevelCommitRetainingBase
+		sc.completion = completionCommitRetaining
+		return sc, true
+	case level >= LevelRollbackRetainingBase && level < LevelRollbackRetainingBase+numInternalIsolationLevels:
+		sc.isolation = level - LevelRollbackRetainingBase
+		sc.completion = completionRollbackRetaining
+		return sc, true
+	case level >= LevelPrepareThenDieBase && level < LevelPrepareThenDieBase+numInternalIsolationLevels:
+		sc.isolation = level - LevelPrepareThenDieBase
+		sc.completion = completionPrepareThenDie
+		return sc, true
+	case level >= LevelHardDropBase && level < LevelHardDropBase+numInternalIsolationLevels:
+		sc.isolation = level - LevelHardDropBase
+		sc.completion = completionHardDrop
+		return sc, true
+	}
+	switch level {
+	case 0, 1: // sql.LevelDefault / LevelReadCommitted / ISOLATION_LEVEL_READ_COMMITED
+		sc.isolation = ISOLATION_LEVEL_READ_COMMITED
+	case 3: // sql.LevelRepeatableRead / ISOLATION_LEVEL_REPEATABLE_READ
+		sc.isolation = ISOLATION_LEVEL_REPEATABLE_READ
+	case 4: // sql.LevelSerializable / ISOLATION_LEVEL_SERIALIZABLE
+		sc.isolation = ISOLATION_LEVEL_SERIALIZABLE
+	case 5: // ISOLATION_LEVEL_READ_COMMITED_NOWAIT (sql.LevelLinearizable value reused)
+		sc.isolation = ISOLATION_LEVEL_READ_COMMITED
+		sc.waitMode = isc_tpb_nowait
+	case 6: // ISOLATION_LEVEL_READ_COMMITED_RO_NOWAIT
+		sc.isolation = ISOLATION_LEVEL_READ_COMMITED
+		sc.ro = true
+		sc.waitMode = isc_tpb_nowait
+	default:
+		return sc, false
+	}
+	return sc, true
+}
+
+// tpbBytes materializes the scenario into a TPB. isc_tpb_lock_timeout is
+// encoded length-prefixed little-endian (VAX) per tra.cpp; it conflicts with
+// isc_tpb_nowait server-side, so it implies WAIT.
+func (sc txScenario) tpbBytes() ([]byte, error) {
+	tpb := []byte{isc_tpb_version3}
+	switch sc.isolation {
+	case ISOLATION_LEVEL_READ_COMMITED, ISOLATION_LEVEL_READ_COMMITED_NOWAIT,
+		ISOLATION_LEVEL_READ_COMMITED_RO, ISOLATION_LEVEL_READ_COMMITED_RO_NOWAIT:
+		tpb = append(tpb, isc_tpb_read_committed, isc_tpb_rec_version)
+	case ISOLATION_LEVEL_READ_COMMITED_LEGACY, ISOLATION_LEVEL_READ_COMMITED_LEGACY_NOWAIT:
+		tpb = append(tpb, isc_tpb_read_committed, isc_tpb_no_rec_version)
+	case ISOLATION_LEVEL_REPEATABLE_READ, ISOLATION_LEVEL_REPEATABLE_READ_NOWAIT,
+		ISOLATION_LEVEL_REPEATABLE_READ_RO:
+		tpb = append(tpb, isc_tpb_concurrency)
+	case ISOLATION_LEVEL_SERIALIZABLE, ISOLATION_LEVEL_SERIALIZABLE_RO:
+		tpb = append(tpb, isc_tpb_consistency)
+	default:
+		return nil, ErrInvalidIsolationLevel
+	}
+	if sc.ro {
+		tpb = append(tpb, isc_tpb_read)
+	} else {
+		tpb = append(tpb, isc_tpb_write)
+	}
+	switch {
+	case sc.lockTimeout > 0:
+		tpb = append(tpb, isc_tpb_wait, isc_tpb_lock_timeout,
+			2, byte(sc.lockTimeout), byte(sc.lockTimeout>>8))
+	case sc.waitMode == isc_tpb_nowait:
+		tpb = append(tpb, isc_tpb_nowait)
+	default:
+		tpb = append(tpb, isc_tpb_wait)
+	}
+	return tpb, nil
 }
 
 func tpbForIsolationLevel(isolationLevel int) ([]byte, error) {
@@ -88,6 +209,9 @@ func tpbForIsolationLevel(isolationLevel int) ([]byte, error) {
 			byte(isc_tpb_rec_version),
 		}, nil
 	default:
+		if sc, ok := decodeDriverLevel(isolationLevel); ok {
+			return sc.tpbBytes()
+		}
 		return nil, ErrInvalidIsolationLevel
 	}
 }
@@ -97,6 +221,10 @@ func (tx *firebirdsqlTx) begin() (err error) {
 	if err != nil {
 		return err
 	}
+	return tx.beginWithTPB(tpb)
+}
+
+func (tx *firebirdsqlTx) beginWithTPB(tpb []byte) (err error) {
 	err = tx.fc.wp.opTransaction(tpb)
 	if err != nil {
 		return
@@ -105,12 +233,27 @@ func (tx *firebirdsqlTx) begin() (err error) {
 	if err != nil {
 		return
 	}
+	tx.tpb = tpb
 	tx.needBegin = false
 	tx.fc.transactionSet[tx] = struct{}{}
 	return
 }
 
-func (tx *firebirdsqlTx) commitRetainging() (err error) {
+// abandon detaches the tx from the connection after the socket is (about to
+// be) gone, so teardown loops (Conn.Close) do not talk to a dead wire and do
+// not roll the transaction back behind the planned drop.
+func (tx *firebirdsqlTx) abandon() {
+	tx.needBegin = true
+	tx.plannedDrop = true
+	delete(tx.fc.transactionSet, tx)
+	if tx.fc.tx == tx {
+		tx.fc.tx = nil
+	}
+}
+
+// commitRetainingInternal dispatches COMMIT RETAINING; the wire transaction
+// stays live and becomes the next transaction on this connection.
+func (tx *firebirdsqlTx) commitRetainingInternal() (err error) {
 	err = tx.fc.wp.opCommitRetaining(tx.transHandle)
 	if err != nil {
 		return
@@ -120,10 +263,56 @@ func (tx *firebirdsqlTx) commitRetainging() (err error) {
 	_, _, _, err = tx.fc.wp.opResponseTimeout(abandonReadTimeout)
 	tx.fc.wp.clearInlineBlobCache(tx.transHandle)
 	tx.isAutocommit = tx.fc.isAutocommit
+	tx.retained = true
 	return
 }
 
+// rollbackRetainingInternal dispatches ROLLBACK RETAINING (undoes the changes,
+// keeps the transaction context live for reuse).
+func (tx *firebirdsqlTx) rollbackRetainingInternal() (err error) {
+	err = tx.fc.wp.opRollbackRetaining(tx.transHandle)
+	if err != nil {
+		return
+	}
+	_, _, _, err = tx.fc.wp.opResponseTimeout(abandonReadTimeout)
+	tx.fc.wp.clearInlineBlobCache(tx.transHandle)
+	tx.isAutocommit = tx.fc.isAutocommit
+	tx.retained = true
+	return
+}
+
+// prepareThenDie runs the two-phase prepare (isc_prepare_transaction) and then
+// kills the socket: the transaction is left in limbo, resolvable by gfix.
+func (tx *firebirdsqlTx) prepareThenDie() (err error) {
+	if err = tx.fc.wp.opPrepare(tx.transHandle); err != nil {
+		return
+	}
+	if _, _, _, err = tx.fc.wp.opResponse(); err != nil {
+		return
+	}
+	tx.fc.wp.clearInlineBlobCache(tx.transHandle)
+	tx.abandon()
+	closeErr := tx.fc.wp.conn.Close()
+	return fmt.Errorf("transaction prepared, socket dropped: left in limbo (planned; close: %v): %w", closeErr, driver.ErrBadConn)
+}
+
+// hardDrop closes the socket without rollback while the transaction is open:
+// the server cleans it up like a crashed attachment.
+func (tx *firebirdsqlTx) hardDrop() (err error) {
+	tx.abandon()
+	closeErr := tx.fc.wp.conn.Close()
+	return fmt.Errorf("planned hard connection drop with an open transaction (socket close: %v): %w", closeErr, driver.ErrBadConn)
+}
+
 func (tx *firebirdsqlTx) Commit() (err error) {
+	switch tx.completion {
+	case completionCommitRetaining:
+		tx.completion = completionPlain // intent applies once
+		return tx.commitRetainingInternal()
+	case completionPrepareThenDie:
+		tx.completion = completionPlain
+		return tx.prepareThenDie()
+	}
 	err = tx.fc.wp.opCommit(tx.transHandle)
 	if err != nil {
 		return err
@@ -132,10 +321,20 @@ func (tx *firebirdsqlTx) Commit() (err error) {
 	tx.fc.wp.clearInlineBlobCache(tx.transHandle)
 	tx.isAutocommit = tx.fc.isAutocommit
 	tx.needBegin = true
+	tx.retained = false
+	delete(tx.fc.transactionSet, tx)
 	return
 }
 
 func (tx *firebirdsqlTx) Rollback() (err error) {
+	switch tx.completion {
+	case completionHardDrop:
+		tx.completion = completionPlain
+		return tx.hardDrop()
+	case completionRollbackRetaining:
+		tx.completion = completionPlain
+		return tx.rollbackRetainingInternal()
+	}
 	err = tx.fc.wp.opRollback(tx.transHandle)
 	if err != nil {
 		return err
@@ -146,6 +345,8 @@ func (tx *firebirdsqlTx) Rollback() (err error) {
 	tx.fc.wp.clearInlineBlobCache(tx.transHandle)
 	tx.isAutocommit = tx.fc.isAutocommit
 	tx.needBegin = true
+	tx.retained = false
+	delete(tx.fc.transactionSet, tx)
 	return
 }
 

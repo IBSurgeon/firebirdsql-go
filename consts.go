@@ -509,6 +509,7 @@ const (
 	op_transaction        = 29
 	op_commit             = 30
 	op_rollback           = 31
+	op_prepare            = 32 // two-phase transaction prepare (limbo generator / 2PC)
 	op_open_blob          = 35
 	op_get_segment        = 36
 	op_put_segment        = 37
@@ -642,13 +643,49 @@ const (
 	ISOLATION_LEVEL_READ_COMMITED_RO_NOWAIT
 )
 
+// Additional isolation presets completing the matrix used by fb-loadgen
+// (values 7..10; the iota block above stays 0..6 for wire compatibility).
+const (
+	ISOLATION_LEVEL_READ_COMMITED_LEGACY_NOWAIT = 7 // RC, no_rec_version, nowait
+	ISOLATION_LEVEL_REPEATABLE_READ_NOWAIT      = 8 // snapshot (concurrency), nowait
+	ISOLATION_LEVEL_REPEATABLE_READ_RO          = 9 // snapshot, read-only
+	ISOLATION_LEVEL_SERIALIZABLE_RO             = 10 // consistency, read-only
+)
+
+// numInternalIsolationLevels bounds the iso component of the encoded levels below.
+const numInternalIsolationLevels = 11
+
 // Driver-specific transaction isolation levels for database/sql.
 //
-// database/sql doesn't have a way to express Firebird's NOWAIT/LOCK TIMEOUT,
-// so this driver exposes a custom value for use in sql.TxOptions.Isolation.
+// database/sql doesn't have a way to express Firebird's NOWAIT/LOCK TIMEOUT
+// or the transaction completion intents used by fb-loadgen, so this driver
+// encodes them into the numeric IsolationLevel value (it travels through
+// database/sql unchanged and is decoded in BeginTx):
 const (
 	// LevelReadCommittedNoWait starts a READ COMMITTED transaction with NOWAIT lock resolution.
 	LevelReadCommittedNoWait = 1000
+
+	// LevelLockTimeoutBase+n (1 <= n <= maxLockTimeout) starts a READ COMMITTED
+	// (rec_version) transaction in WAIT mode with isc_tpb_lock_timeout = n seconds.
+	LevelLockTimeoutBase = 2000
+	maxLockTimeout       = 2999 // keep the range below LevelCommitRetainingBase
+
+	// LevelCommitRetainingBase+iso commits with COMMIT RETAINING; the wire
+	// transaction stays live and is reused as the next transaction on the
+	// connection (iso = one of the ISOLATION_LEVEL_* constants).
+	LevelCommitRetainingBase = 5000
+	// LevelRollbackRetainingBase+iso rolls back with ROLLBACK RETAINING.
+	LevelRollbackRetainingBase = 6000
+	// LevelPrepareThenDieBase+iso prepares the transaction (isc_prepare_transaction)
+	// and then drops the socket: the transaction stays in limbo (single-database).
+	LevelPrepareThenDieBase = 7000
+	// LevelHardDropBase+iso closes the socket without rollback while the
+	// transaction is open (server-side cleanup / crash simulation).
+	LevelHardDropBase = 8000
+
+	// MaxLockTimeoutSec is the largest accepted lock-timeout value in seconds
+	// (also the server-side limit: MAX_SSHORT in tra.cpp).
+	MaxLockTimeoutSec = 32767
 )
 
 // Event

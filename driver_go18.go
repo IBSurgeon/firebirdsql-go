@@ -25,7 +25,6 @@ package firebirdsql
 
 import (
 	"context"
-	"database/sql"
 	"database/sql/driver"
 	"errors"
 	"fmt"
@@ -54,29 +53,16 @@ func (stmt *firebirdsqlStmt) QueryContext(ctx context.Context, namedargs []drive
 }
 
 func (fc *firebirdsqlConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
+	sc, ok := decodeDriverLevel(int(opts.Isolation))
+	if !ok {
+		return nil, errors.New("This isolation level is not supported.")
+	}
+	// ReadOnly composes with the requested isolation instead of replacing it
+	// (before, ReadOnly always degraded to READ COMMITTED RO).
 	if opts.ReadOnly {
-		// Preserve existing behaviour: readonly always uses READ COMMITTED RO.
-		// The only extra knob we currently support here is NOWAIT.
-		if (sql.IsolationLevel)(opts.Isolation) == LevelReadCommittedNoWait {
-			return fc.begin(ISOLATION_LEVEL_READ_COMMITED_RO_NOWAIT)
-		}
-		return fc.begin(ISOLATION_LEVEL_READ_COMMITED_RO)
+		sc.ro = true
 	}
-
-	switch (sql.IsolationLevel)(opts.Isolation) {
-	case sql.LevelDefault:
-		return fc.begin(ISOLATION_LEVEL_READ_COMMITED)
-	case sql.LevelReadCommitted:
-		return fc.begin(ISOLATION_LEVEL_READ_COMMITED)
-	case LevelReadCommittedNoWait:
-		return fc.begin(ISOLATION_LEVEL_READ_COMMITED_NOWAIT)
-	case sql.LevelRepeatableRead:
-		return fc.begin(ISOLATION_LEVEL_REPEATABLE_READ)
-	case sql.LevelSerializable:
-		return fc.begin(ISOLATION_LEVEL_SERIALIZABLE)
-	default:
-	}
-	return nil, errors.New("This isolation level is not supported.")
+	return fc.beginScenario(sc)
 }
 
 func (fc *firebirdsqlConn) PrepareContext(ctx context.Context, query string) (driver.Stmt, error) {
