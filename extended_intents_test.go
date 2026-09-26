@@ -348,8 +348,13 @@ func TestLivePrepareThenDieLeavesLimbo(t *testing.T) {
 	}, 15*time.Second, 300*time.Millisecond, "prepared (limbo) transaction must be listed by the services API")
 	t.Logf("limbo transactions: %v", tids)
 
-	// Resolve it (gfix -rollback equivalent) and verify the list drains.
-	require.NoError(t, mm.RollbackLimboTransaction(file, tids[0]))
+	// Resolve it (gfix -rollback equivalent). The action may legally report
+	// failure here: the engine's own recovery can resolve the transaction
+	// between the list query and the action, which now surfaces as an error
+	// instead of a silent nil. The behavioral contract is that the list drains.
+	if rerr := mm.RollbackLimboTransaction(file, tids[0]); rerr != nil {
+		t.Logf("resolution attempt reported: %v", rerr)
+	}
 	require.Eventually(t, func() bool {
 		rest, err := mm.GetLimboTransactions(file)
 		return err == nil && len(rest) == 0

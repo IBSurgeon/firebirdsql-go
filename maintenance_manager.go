@@ -23,6 +23,12 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 package firebirdsql
 
+import (
+	"fmt"
+	"strings"
+	"sync"
+)
+
 type MaintenanceManager struct {
 	connBuilder func() (*ServiceManager, error)
 }
@@ -181,13 +187,49 @@ func (mm *MaintenanceManager) Validate(database string, options int) error {
 }
 
 // resolveLimbo runs one isc_spb_rpr_*_trans_64 repair action for a single
-// limbo transaction id (commit / rollback / two-phase recovery).
+// limbo transaction id (commit / rollback / two-phase recovery) and maps the
+// outcome onto an error. The Services API reports the outcome of these
+// actions ONLY through their output lines: the action completes at protocol
+// level even when it could not resolve the transaction, so dropping the
+// lines turns every failure into a silent success. Any output line therefore
+// means the transaction was NOT resolved by this action; a silent completion
+// means it was.
 func (mm *MaintenanceManager) resolveLimbo(database string, action int, traID int64) error {
+	lines, err := mm.resolveLimboVerbose(database, action, traID)
+	if err != nil {
+		return err
+	}
+	if len(lines) > 0 {
+		return fmt.Errorf("firebirdsql: limbo repair action for transaction %d did not resolve it: %s",
+			traID, strings.Join(lines, " | "))
+	}
+	return nil
+}
+
+// resolveLimboVerbose runs the repair action and also returns the action's
+// own output lines, for callers that need to inspect the raw report.
+func (mm *MaintenanceManager) resolveLimboVerbose(database string, action int, traID int64) ([]string, error) {
 	spb := NewXPBWriterFromTag(isc_action_svc_repair)
 	spb.PutString(isc_spb_dbname, database)
 	// The transaction id travels in the action clump itself (isc_spb_rpr_*_trans_64).
 	spb.PutInt64(byte(action), traID)
-	return mm.attach(spb.Bytes(), nil)
+
+	var (
+		wg        sync.WaitGroup
+		lines     = make(chan string)
+		collected []string
+	)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for line := range lines {
+			collected = append(collected, line)
+		}
+	}()
+	err := mm.attach(spb.Bytes(), lines)
+	close(lines)
+	wg.Wait()
+	return collected, err
 }
 
 // CommitLimboTransaction commits the prepared limbo transaction traID
