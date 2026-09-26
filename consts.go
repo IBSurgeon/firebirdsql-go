@@ -662,8 +662,16 @@ const numInternalIsolationLevels = 11
 // encodes them into the numeric IsolationLevel value (it travels through
 // database/sql unchanged and is decoded in BeginTx):
 const (
-	// LevelReadCommittedNoWait starts a READ COMMITTED transaction with NOWAIT lock resolution.
-	LevelReadCommittedNoWait = 1000
+	// Unambiguous driver-level presets (1000..1999): plain internal constants
+	// 0..6 must not travel through database/sql as IsolationLevel values
+	// because they collide with the sql.Level* numbers.
+	LevelReadCommittedNoWait       = 1000 // RC rec_version, nowait
+	LevelReadCommittedRecVersion   = 1050 // RC rec_version, wait (LevelDefault equivalent, explicit)
+	LevelReadCommittedLegacy       = 1100 // RC no_rec_version, wait
+	LevelReadCommittedLegacyNoWait = 1150 // RC no_rec_version, nowait
+	LevelSnapshot                  = 1200 // snapshot (concurrency), wait
+	LevelSnapshotNoWait            = 1250 // snapshot, nowait
+	LevelConsistency               = 1300 // consistency (table stability), wait
 
 	// LevelLockTimeoutBase+n (1 <= n <= maxLockTimeout) starts a READ COMMITTED
 	// (rec_version) transaction in WAIT mode with isc_tpb_lock_timeout = n seconds.

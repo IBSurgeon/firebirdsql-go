@@ -75,6 +75,26 @@ func decodeDriverLevel(level int) (txScenario, bool) {
 		sc.isolation = ISOLATION_LEVEL_READ_COMMITED
 		sc.waitMode = isc_tpb_nowait
 		return sc, true
+	case level == LevelReadCommittedRecVersion:
+		sc.isolation = ISOLATION_LEVEL_READ_COMMITED
+		return sc, true
+	case level == LevelReadCommittedLegacy:
+		sc.isolation = ISOLATION_LEVEL_READ_COMMITED_LEGACY
+		return sc, true
+	case level == LevelReadCommittedLegacyNoWait:
+		sc.isolation = ISOLATION_LEVEL_READ_COMMITED_LEGACY_NOWAIT
+		sc.waitMode = isc_tpb_nowait
+		return sc, true
+	case level == LevelSnapshot:
+		sc.isolation = ISOLATION_LEVEL_REPEATABLE_READ
+		return sc, true
+	case level == LevelSnapshotNoWait:
+		sc.isolation = ISOLATION_LEVEL_REPEATABLE_READ_NOWAIT
+		sc.waitMode = isc_tpb_nowait
+		return sc, true
+	case level == LevelConsistency:
+		sc.isolation = ISOLATION_LEVEL_SERIALIZABLE
+		return sc, true
 	case level > LevelLockTimeoutBase && level <= LevelLockTimeoutBase+maxLockTimeout:
 		sc.isolation = ISOLATION_LEVEL_READ_COMMITED
 		sc.lockTimeout = level - LevelLockTimeoutBase
