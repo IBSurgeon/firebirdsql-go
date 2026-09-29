@@ -29,6 +29,7 @@ import (
 	"database/sql/driver"
 	"math/big"
 	"reflect"
+	"time"
 )
 
 type firebirdsqlConn struct {
@@ -266,6 +267,8 @@ func openFirebirdsqlConn(dsn *firebirdDsn, dbOp func(*wireProtocol) error) (*fir
 	wp.maxInlineBlobSize = int32(parseOptionInt(dsn.options["max_inline_blob_size"], 65536))
 	wp.maxBlobCacheSize = int32(parseOptionInt(dsn.options["max_blob_cache_size"], 10485760))
 	wp.inlineBlobCache = newInlineBlobCache(int(wp.maxBlobCacheSize))
+	wp.cancelHardDrop = convertToBool(dsn.options["cancel_hard_drop"], false)
+	wp.cancelHardDropGrace = time.Duration(parseOptionInt(dsn.options["cancel_hard_drop_grace"], 3000)) * time.Millisecond
 
 	if err = wp.opConnect(dsn.dbName, dsn.user, dsn.passwd, dsn.options, clientPublic); err != nil {
 		return nil, err
