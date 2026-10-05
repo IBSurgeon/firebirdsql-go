@@ -352,12 +352,23 @@ func (tx *firebirdsqlTx) rollbackRetainingInternal() (err error) {
 
 // prepareThenDie runs the two-phase prepare (isc_prepare_transaction) and then
 // kills the socket: the transaction is left in limbo, resolvable by gfix.
-func (tx *firebirdsqlTx) prepareThenDie() (err error) {
-	if err = tx.fc.wp.opPrepare(tx.transHandle); err != nil {
-		return
+// The prepare round-trip is bounded by the BeginTx context like the plain
+// commit; if the context ends mid-prepare the connection is reported dead and
+// the transaction may be left in limbo — for this completion intent that is
+// the planned outcome either way.
+func (tx *firebirdsqlTx) prepareThenDie(ctx context.Context) (err error) {
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	if _, _, _, err = tx.fc.wp.opResponse(); err != nil {
-		return
+	err = tx.fc.wp.withContextDeadline(ctx, func() error {
+		if err := tx.fc.wp.opPrepare(tx.transHandle); err != nil {
+			return err
+		}
+		_, _, _, err := tx.fc.wp.opResponse()
+		return err
+	})
+	if err != nil {
+		return err
 	}
 	tx.fc.wp.clearInlineBlobCache(tx.transHandle)
 	tx.abandon()
@@ -388,7 +399,7 @@ func (tx *firebirdsqlTx) Commit() (err error) {
 		return tx.commitRetainingInternal()
 	case completionPrepareThenDie:
 		tx.completion = completionPlain
-		return tx.prepareThenDie()
+		return tx.prepareThenDie(ctx)
 	}
 	if ctx == nil {
 		ctx = context.Background()
