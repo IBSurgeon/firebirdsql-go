@@ -24,6 +24,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 package firebirdsql
 
 import (
+	"context"
 	"database/sql/driver"
 	"fmt"
 )
@@ -59,6 +60,11 @@ type firebirdsqlTx struct {
 	completion     int    // pending completion intent (consumed by Commit/Rollback)
 	retained       bool   // a retaining completion left this wire tx live as the next transaction
 	plannedDrop    bool   // hard-drop / prepare-then-die: teardown loops must skip this tx
+	// ctx is the BeginTx context. database/sql documents it as used until the
+	// transaction is committed or rolled back, and Tx.Commit takes no context
+	// of its own, so Commit is bounded by it. Nil for the connection's
+	// autocommit transaction.
+	ctx context.Context
 }
 
 // decodeDriverLevel decodes a database/sql IsolationLevel (possibly carrying a
@@ -368,6 +374,14 @@ func (tx *firebirdsqlTx) hardDrop() (err error) {
 }
 
 func (tx *firebirdsqlTx) Commit() (err error) {
+	// Commit is bounded by the BeginTx context: if it ends before the server
+	// answers, Commit returns the context error wrapped with
+	// driver.ErrBadConn and the connection is discarded. As with any
+	// connection lost mid-commit, the outcome of the commit on the server is
+	// then unknown. The completion-intent paths below dispatch before the
+	// context-bounded plain commit and keep their own read bounds.
+	ctx := tx.ctx
+	tx.ctx = nil
 	switch tx.completion {
 	case completionCommitRetaining:
 		tx.completion = completionPlain // intent applies once
@@ -376,11 +390,16 @@ func (tx *firebirdsqlTx) Commit() (err error) {
 		tx.completion = completionPlain
 		return tx.prepareThenDie()
 	}
-	err = tx.fc.wp.opCommit(tx.transHandle)
-	if err != nil {
-		return err
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	_, _, _, err = tx.fc.wp.opResponse()
+	err = tx.fc.wp.withContextDeadline(ctx, func() error {
+		if err := tx.fc.wp.opCommit(tx.transHandle); err != nil {
+			return err
+		}
+		_, _, _, err := tx.fc.wp.opResponse()
+		return err
+	})
 	tx.fc.wp.clearInlineBlobCache(tx.transHandle)
 	tx.isAutocommit = tx.fc.isAutocommit
 	tx.needBegin = true
@@ -389,7 +408,10 @@ func (tx *firebirdsqlTx) Commit() (err error) {
 	return
 }
 
+// Rollback keeps its fixed teardown bound instead of the BeginTx context:
+// database/sql rolls back precisely when that context has ended.
 func (tx *firebirdsqlTx) Rollback() (err error) {
+	tx.ctx = nil
 	switch tx.completion {
 	case completionHardDrop:
 		tx.completion = completionPlain

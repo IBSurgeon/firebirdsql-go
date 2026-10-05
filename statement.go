@@ -202,19 +202,30 @@ func (stmt *firebirdsqlStmt) ensureInputXsqlda(args []driver.Value) error {
 	return resolveArrayMeta(stmt.fc, stmt.inputXsqlda)
 }
 
+// prepareExecute runs the round-trips that precede op_execute (lazy begin,
+// re-prepare of a freed handle, bind metadata) bounded by ctx. It returns the
+// statement to execute, which is a new one when the handle had been freed.
+func (stmt *firebirdsqlStmt) prepareExecute(ctx context.Context, args []driver.Value) (*firebirdsqlStmt, error) {
+	err := stmt.fc.wp.withContextDeadline(ctx, func() error {
+		if stmt.fc.tx.needBegin {
+			if err := stmt.fc.tx.begin(); err != nil {
+				return err
+			}
+		}
+		if stmt.stmtHandle == -1 {
+			s, err := newFirebirdsqlStmt(stmt.fc, stmt.queryString)
+			if err != nil {
+				return err
+			}
+			stmt = s
+		}
+		return stmt.ensureInputXsqlda(args)
+	})
+	return stmt, err
+}
+
 func (stmt *firebirdsqlStmt) exec(ctx context.Context, args []driver.Value) (result driver.Result, err error) {
-	if stmt.fc.tx.needBegin {
-		if err = stmt.fc.tx.begin(); err != nil {
-			return
-		}
-	}
-	if stmt.stmtHandle == -1 {
-		stmt, err = newFirebirdsqlStmt(stmt.fc, stmt.queryString)
-		if err != nil {
-			return
-		}
-	}
-	if err = stmt.ensureInputXsqlda(args); err != nil {
+	if stmt, err = stmt.prepareExecute(ctx, args); err != nil {
 		return
 	}
 	err = stmt.fc.wp.opExecute(stmt, args, stmt.inputXsqlda)
@@ -270,21 +281,19 @@ func (stmt *firebirdsqlStmt) exec(ctx context.Context, args []driver.Value) (res
 		return
 	}
 
+	records, countErr := decodeStatementRecords(buf)
 	var rowcount int64
-	if len(buf) >= 32 {
-		if stmt.stmtType == isc_info_sql_stmt_select ||
-			stmt.stmtType == isc_info_sql_stmt_select_for_upd {
-			rowcount = int64(bytes_to_int32(buf[20:24]))
-		} else {
-			rowcount = int64(bytes_to_int32(buf[27:31]) + bytes_to_int32(buf[6:10]) + bytes_to_int32(buf[13:17]))
-		}
+	if countErr == nil {
+		rowcount, countErr = records.rowsAffected(stmt.stmtType)
+	}
+	// Execution already succeeded. Invalid count metadata belongs to RowsAffected,
+	// never to Exec's error (and must not prevent the existing autocommit).
+	if countErr != nil {
+		result = &firebirdsqlResultCountError{err: countErr}
 	} else {
-		rowcount = 0
+		result = &firebirdsqlResult{affectedRows: rowcount}
 	}
 
-	result = &firebirdsqlResult{
-		affectedRows: rowcount,
-	}
 	if stmt.fc.tx.isAutocommit {
 		if cerr := stmt.fc.tx.commitRetainingInternal(); cerr != nil {
 			return result, cerr
@@ -302,20 +311,7 @@ func (stmt *firebirdsqlStmt) query(ctx context.Context, args []driver.Value) (dr
 	var err error
 	var result []driver.Value
 
-	if stmt.fc.tx.needBegin {
-		if err = stmt.fc.tx.begin(); err != nil {
-			return nil, err
-		}
-	}
-
-	if stmt.stmtHandle == -1 {
-		stmt, err = newFirebirdsqlStmt(stmt.fc, stmt.queryString)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	if err = stmt.ensureInputXsqlda(args); err != nil {
+	if stmt, err = stmt.prepareExecute(ctx, args); err != nil {
 		return nil, err
 	}
 

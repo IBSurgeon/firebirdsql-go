@@ -62,7 +62,17 @@ func (fc *firebirdsqlConn) BeginTx(ctx context.Context, opts driver.TxOptions) (
 	if opts.ReadOnly {
 		sc.ro = true
 	}
-	return fc.beginScenario(sc)
+	var tx driver.Tx
+	err := fc.wp.withContextDeadline(ctx, func() error {
+		var err error
+		tx, err = fc.beginScenario(sc)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	tx.(*firebirdsqlTx).ctx = ctx // bounds Commit (see firebirdsqlTx.Commit)
+	return tx, nil
 }
 
 func (fc *firebirdsqlConn) PrepareContext(ctx context.Context, query string) (driver.Stmt, error) {
@@ -128,7 +138,8 @@ func (fc *firebirdsqlConn) QueryContext(ctx context.Context, query string, named
 // ================== Implementation of the Connector interface ====================
 
 type firebirdConnector struct {
-	dsn *firebirdDsn
+	dsn    *firebirdDsn
+	dsnErr error
 }
 
 func (d *firebirdConnector) OpenConnector(dsns string) (driver.Connector, error) {
@@ -144,5 +155,8 @@ func (fc *firebirdConnector) Driver() driver.Driver {
 }
 
 func (fc *firebirdConnector) Connect(ctx context.Context) (driver.Conn, error) {
-	return attachFirebirdsqlConn(fc.dsn)
+	if fc.dsnErr != nil {
+		return nil, fc.dsnErr
+	}
+	return attachFirebirdsqlConn(ctx, fc.dsn)
 }

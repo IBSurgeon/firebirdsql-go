@@ -25,6 +25,7 @@ package firebirdsql
 
 import (
 	"bytes"
+	"context"
 	"database/sql/driver"
 	"encoding/hex"
 	"errors"
@@ -105,6 +106,11 @@ type wireProtocol struct {
 	dbHandle int32
 	addr     string
 
+	// desynced is set when a context abandoned a request/response exchange
+	// halfway (see withContextDeadline): the next bytes on the wire belong to
+	// that exchange, so Close drops the socket instead of talking to the server.
+	desynced bool
+
 	protocolVersion    int32
 	acceptArchitecture int32
 	acceptType         int32
@@ -146,11 +152,15 @@ type wireProtocol struct {
 }
 
 func newWireProtocol(addr string, timezone string, charset string) (*wireProtocol, error) {
+	return newWireProtocolContext(context.Background(), addr, timezone, charset)
+}
+
+func newWireProtocolContext(ctx context.Context, addr string, timezone string, charset string) (*wireProtocol, error) {
 	p := new(wireProtocol)
 	p.buf = make([]byte, 0, BUFFER_LEN)
 
 	p.addr = addr
-	conn, err := net.Dial("tcp", p.addr)
+	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", p.addr)
 	if err != nil {
 		return nil, err
 	}
@@ -2247,6 +2257,9 @@ func (p *wireProtocol) opConnectRequest() error {
 	p.packInt(p.dbHandle)
 	p.packInt(partner_identification)
 	_, err := p.sendPackets()
+	if err == nil {
+		err = p.conn.Flush()
+	}
 	return err
 }
 
@@ -2259,6 +2272,9 @@ func (p *wireProtocol) opQueEvents(auxHandle int32, epb []byte, eventId int32) e
 	p.packInt(argument_to_ast_routine)
 	p.packInt(eventId)
 	_, err := p.sendPackets()
+	if err == nil {
+		err = p.conn.Flush()
+	}
 	return err
 }
 
