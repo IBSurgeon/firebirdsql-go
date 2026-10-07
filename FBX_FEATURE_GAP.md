@@ -1,7 +1,7 @@
 # fbx → firebirdsql-go feature gap analysis
 
-Source: E:\Projects_2026\fbx (fbx v0.5.0, Red Database / Firebird driver for Go, pgx-inspired).
-Compared against: E:\Projects_2026\firebirdsql-go current state — `master` plus the wire-protocol feature work (batch DML, scrollable cursors, inline blobs, execute-immediate) on branch `wire-protocol-improvements`.
+Source: E:\Projects_2026\fbx (fbx **v0.6.0**, 6d1a729, pulled 2026-10-06; previous review was against v0.5.0).
+Compared against: E:\Projects_2026\firebirdsql branch `extended-load-intents` (2ac5aa4) — upstream master plus arrays (PR #294), cancel_hard_drop (#296), CI FB4/5 (#297), isolation presets + lock timeout (#299), maintenance/limbo repair (#300); completion intents held behind #299.
 
 Legend: ❌ not implemented in firebirdsql-go · 🟡 partial (exists, but weaker/less configurable) · ✅ parity (not listed per-area unless relevant).
 
@@ -66,7 +66,7 @@ Legend: ❌ not implemented in firebirdsql-go · 🟡 partial (exists, but weake
 
 | Feature | Status | Notes |
 |---|---|---|
-| Lock timeout option (`LockTimeout` seconds → `tpb_lock_timeout`) | ❌ | only isolation + read-only |
+| Lock timeout option (`LockTimeout` seconds → `tpb_lock_timeout`) | ✅ | PR #299: `LevelLockTimeoutBase`+n presets (VAX length-prefixed per tra.cpp, implies WAIT) |
 | Raw TPB transactions (`BeginTxTPB([]byte)`) | ❌ | TPB builder is internal |
 | Pseudo-nested transactions via SAVEPOINT API (`tx.Begin/Commit/Rollback` nesting) | ❌ | savepoints work via raw SQL only (tested) |
 | `BeginFunc` / `BeginTxFunc` helpers | ❌ | — |
@@ -102,7 +102,8 @@ Legend: ❌ not implemented in firebirdsql-go · 🟡 partial (exists, but weake
 | Typed nullable structs (`fbtype.Text`, `Int8`, `DecFloat16`…) with codecs | ❌ | — |
 | `Int128` Go type (128-bit) beyond string/int64 handling | 🟡 | INT128 supported as string/big-int conversions; no native Int128 type |
 | `Numeric` arbitrary-scale big-decimal Go type | 🟡 | scaled numerics scan to string/float |
-| DecFloat NaN/Infinity special-value handling type | 🟡 | strings only |
+| DecFloat NaN/Infinity special-value handling type | 🟡 | strings only; fbx v0.6.0 additionally normalizes representable DECFLOAT text to the type's coefficient/exponent range (RS-330965) — small portable improvement |
+| `fbtype.Text` / `character.go` typed text wrapper (Scan/Value/JSON) | ❌ | new in fbx v0.6.0; pure-Go, no wire changes |
 | UUID type over CHAR/OCTETS | ❌ | — |
 | `fbtype.Date` multi-layout parsing type | ❌ | `time.Time` only |
 | SMALLINT scans to `int16` when scanning into `any` | ❌ | returns int64 |
@@ -131,7 +132,9 @@ Legend: ❌ not implemented in firebirdsql-go · 🟡 partial (exists, but weake
 |---|---|---|
 | Backup with streaming verbose output + full option set (Factor, Expand, Zip, Compressor, Replace, NoDatabaseTriggers, ParallelWorkers…) | ✅ | firebirdsql BackupManager covers these |
 | Drop database via services/`op_drop_database` | ❌ | missing (see §2) |
-| Restore, NBackup, Maintenance (shutdown/online/validate/sweep/…), User management, Trace sessions, Statistics | ✅ | firebirdsql-only strengths (fbx has these as "planned") |
+| Restore with verbose streaming + option set (Replace, AccessMode, ReplicaMode, DeactivateIndexes, SkipShadows, CommitAfterEachTable, UseAllPageSpace, RDB tablespace paths) | 🟡 | both drivers have it now: fbx v0.6.0 added a full restore manager (RS-322395 follow-up); firebirdsql RestoreManager — verify option parity (notably Replace and tablespace paths) |
+| Statistics (data/index/header/system/record pages, table subset, streaming report writer) | 🟡 | fbx v0.6.0 added `Manager.Statistics` (RS-322395) with an io.Writer report sink; firebirdsql statistics — verify option parity |
+| NBackup, Maintenance (shutdown/online/validate/sweep/…), User management, Trace sessions, **limbo repair** (incl. our `GetLimboTransactions`/`Commit/RollbackLimboTransaction`, PR #300) | ✅ | firebirdsql-only strengths (fbx still has none of these) |
 
 ## 13. Red Database / Firebird 6 specifics
 
@@ -141,17 +144,37 @@ Legend: ❌ not implemented in firebirdsql-go · 🟡 partial (exists, but weake
 | `Isc_dpb_search_path` / SET SEARCH_PATH aware statement-cache invalidation | ❌ | — |
 | Red Database 5.1+/5+ backup options (Replace, Compressor plugin) | 🟡 | option structs exist in firebirdsql backup manager for zip/workers; Replace/Compressor parity to verify |
 | Wire compression + wire encryption combined | ✅ | parity |
+| FB time zone aliases (link names beyond the tz map) | 🟡 | fixed-offset `SystemV/*` zones are in our map (parity); fbx v0.6.0 additionally resolves FB alias names + errors on unsupported SystemV combos (RS-328508); our fallback is session-tz then UTC |
 
 ---
 
-## Priority suggestion (impact/effort)
+## v0.6.0 delta review (pulled 2026-10-06, 123 commits)
 
-1. **Arrays** (`op_get_slice`/`op_put_slice` + scanning) — the largest real functionality gap; fbx proves the wire-level design.
-2. **Statement cache + query exec modes** — biggest performance lever for real applications.
-3. **NamedArgs** query rewriting — small, high ergonomic value.
-4. **BLOB streaming** (stream BPB, buffer size option, lazy `io.ReadCloser` scan, `io.Reader` params) — removes whole-blob-in-memory limits.
-5. **Connection-string modernization**: env vars, keyword/value strings, multi-host fallback, `target_session_attrs`, `connect_timeout`.
-6. **zeronull package + row collectors** — pure-Go add-ons, zero wire changes.
-7. **Raw TPB / lock timeout / savepoint nesting API / BeginFunc** — transaction ergonomics.
-8. **Drop database / `op_drop_database`** and per-statement `SetTimeout`/`SetCursorFlags`/`SetInlineBlobSize`.
-9. **Schemas (FB6/RDB)**, **extra SRP variants + pluggable auth**, **tracers/tracelog**, **Hijack/Construct**.
+| Change (upstream ref) | What it is | Disposition for firebirdsql-go |
+|---|---|---|
+| RS-336930 — SQL_TYPE_NULL parameter encoding | fbx `NullCodec` previously appended no payload for non-NULL values bound to SQL_TYPE_NULL params → wire desync; now it resolves null-ness (Valuer/pointer indirection) and appends the value | **Not affected.** Our `paramsToBlr` is value-driven: every non-nil param appends its typed payload and BLR; nil params send the null bitmap (V13+) / per-param flags with `blr_text(0,0)` (`TestParamsToBlrNil` pins the bytes). The fbx bug class does not exist here |
+| RS-322395 — statistics manager | New `fbservice/statistics.go`: `Manager.Statistics(ctx, db, opts...)`, io.Writer report sink, data/index/header/system/record pages, table subset | fbx closed a services-API lead of ours. Verify option parity on our side; no port needed |
+| Restore manager (v0.6.0) | New `fbservice/restore.go` with Replace/AccessMode/ReplicaMode/indexes/shadows/constraints/tablespace paths | Same — verify parity of our RestoreManager options |
+| RS-328508 — time zones | FB alias names + fixed-offset `SystemV/*` zones; error on unsupported SystemV combos | `SystemV/*` already in our `timezonemap.go` (parity). Alias resolution is a small gap; low priority (our fallback is session-tz → UTC, instant always preserved) |
+| RS-330965 — DECFLOAT text normalization | Fits representable values to the coefficient/exponent range exactly on parse | Small, self-contained improvement candidate for our `decfloat.go` (we return strings as-is) |
+| RS-336631 — status vector extra args | Better mapping of trailing status-vector args into the error | Review our `errors.go`/`errmsgs.go` parsing for the same trailing-arg handling; small port candidate |
+| RS-337341 / RS-332347/48 / RS-328477 / search_path deallocate | Session-reset, statement-cache and cursor-cleanup fixes — all inside fbx-only features (statement cache, native conn) | n/a — no equivalent component here; revisit if statement cache gets ported |
+| fbtype stdlib/int_num refactoring | Internal restructuring of codecs/wrappers | No wire-behavior change; array semantics untouched (re-verified parity rows above) |
+| dependabot: x/text 0.42, x/sync 0.23 | Module bumps | n/a |
+
+---
+
+## Priority suggestion (impact/effort) — updated after v0.6.0
+
+1. **Statement cache + query exec modes** — biggest performance lever for real applications; fbx v0.6.0's cache fixes confirm the design is production-shaping.
+2. **NamedArgs** query rewriting — small, high ergonomic value.
+3. **BLOB streaming** (stream BPB, buffer size option, lazy `io.ReadCloser` scan, `io.Reader` params) — removes whole-blob-in-memory limits.
+4. **Connection-string modernization**: env vars, keyword/value strings, multi-host fallback, `target_session_attrs`, `connect_timeout`.
+5. **Services option-parity check vs fbx v0.6.0** (Restore: Replace/tablespace paths; Statistics: page classes + streaming writer) — verification, not a port.
+6. **Small ports**: DECFLOAT text normalization (RS-330965), status-vector trailing-arg hardening (RS-336631), FB tz aliases (RS-328508).
+7. **zeronull package + row collectors** — pure-Go add-ons, zero wire changes.
+8. **Raw TPB / savepoint nesting API / BeginFunc** — transaction ergonomics (lock timeout ✅ #299, retaining ✅ held intents PR).
+9. **Drop database / `op_drop_database`** and per-statement `SetTimeout`/`SetCursorFlags`/`SetInlineBlobSize`.
+10. **Schemas (FB6/RDB)**, **extra SRP variants + pluggable auth**, **tracers/tracelog**, **Hijack/Construct**, `fbtype.Text`.
+
+*(Done since the previous revision: arrays — PR #294; lock timeout — PR #299; limbo repair — PR #300.)*
