@@ -60,7 +60,7 @@ func (stmt *firebirdsqlStmt) freeStatement(mode int32) error {
 		_, _, _, err = stmt.fc.wp.opResponseTimeout(abandonReadTimeout)
 	}
 	if stmt.fc.tx.isAutocommit {
-		stmt.fc.tx.commitRetainingInternal()
+		stmt.fc.tx.commitRetainingInternal(nil) // teardown: fixed bound
 	}
 	return err
 }
@@ -295,7 +295,7 @@ func (stmt *firebirdsqlStmt) exec(ctx context.Context, args []driver.Value) (res
 	}
 
 	if stmt.fc.tx.isAutocommit {
-		if cerr := stmt.fc.tx.commitRetainingInternal(); cerr != nil {
+		if cerr := stmt.fc.tx.commitRetainingInternal(ctx); cerr != nil {
 			return result, cerr
 		}
 	}

@@ -107,8 +107,9 @@ type wireProtocol struct {
 	addr     string
 
 	// desynced is set when a context abandoned a request/response exchange
-	// halfway (see withContextDeadline): the next bytes on the wire belong to
-	// that exchange, so Close drops the socket instead of talking to the server.
+	// halfway (see withContextDeadline), or when a batch request's replies could
+	// not be read in full (receiveTwoResponses): the next bytes on the wire belong
+	// to that exchange, so Close drops the socket instead of talking to the server.
 	desynced bool
 
 	protocolVersion    int32
@@ -595,10 +596,15 @@ func (p *wireProtocol) _parse_connect_response(user string, password string, opt
 	p.debugPrint("_parse_connect_response")
 
 	b, err := p.recvPackets(4)
+	if err != nil {
+		return
+	}
 	opcode := bytes_to_bint32(b)
 
 	for opcode == op_dummy {
-		b, _ = p.recvPackets(4)
+		if b, err = p.recvPackets(4); err != nil {
+			return
+		}
 		opcode = bytes_to_bint32(b)
 	}
 
@@ -611,7 +617,9 @@ func (p *wireProtocol) _parse_connect_response(user string, password string, opt
 		return
 	}
 
-	b, _ = p.recvPackets(12)
+	if b, err = p.recvPackets(12); err != nil {
+		return
+	}
 	p.protocolVersion = int32(b[3])
 	p.acceptArchitecture = bytes_to_bint32(b[4:8])
 	p.acceptType = bytes_to_bint32(b[8:12])
@@ -1508,9 +1516,7 @@ func (p *wireProtocol) opExecute(stmt *firebirdsqlStmt, params []driver.Value, i
 	} else {
 		blr, values, err := p.paramsToBlr(transHandle, params, p.protocolVersion, inputXsqlda)
 		if err != nil {
-			// Nothing was sent, but the op_execute header is already in the
-			// packet buffer — drop it or the next statement desyncs the wire.
-			p.buf = p.buf[:0]
+			p.buf = p.buf[:0] // drop the packed op_execute2 header (see opExecute)
 			return err
 		}
 		p.packBytes(blr)
@@ -1538,7 +1544,9 @@ func (p *wireProtocol) opExecute2(stmt *firebirdsqlStmt, params []driver.Value, 
 	} else {
 		blr, values, err := p.paramsToBlr(transHandle, params, p.protocolVersion, inputXsqlda)
 		if err != nil {
-			p.buf = p.buf[:0] // drop the packed op_execute2 header (see opExecute)
+			// Nothing was sent, but the op_execute header is already in the
+			// packet buffer — drop it or the next statement desyncs the wire.
+			p.buf = p.buf[:0]
 			return err
 		}
 		p.packBytes(blr)
@@ -2001,12 +2009,17 @@ var abandonReadTimeout = 10 * time.Second
 // silent wire must not hang the caller: cancelAndDrain's cancel-ack read, and the teardown
 // reads (statement/cursor close, autocommit commit-retaining, rollback, detach) that
 // database/sql's awaitDone goroutine can reach automatically when a QueryContext deadline
-// fires mid-fetch. The deadline is cleared on return regardless; on timeout the caller
-// discards the connection rather than reusing it.
+// fires mid-fetch. The deadline is cleared on return regardless. On timeout the response
+// is still owed on the wire, so the protocol is marked desynced: IsValid then reports the
+// connection as unusable and database/sql discards it instead of pooling it.
 func (p *wireProtocol) opResponseTimeout(d time.Duration) (int32, []byte, []byte, error) {
 	p.conn.SetDeadline(time.Now().Add(d))
 	defer p.conn.SetDeadline(time.Time{})
-	return p.opResponse()
+	h, oid, buf, err := p.opResponse()
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		p.desynced = true
+	}
+	return h, oid, buf, err
 }
 
 func (p *wireProtocol) opSqlResponse(xsqlda []xSQLVAR) ([]driver.Value, error) {
