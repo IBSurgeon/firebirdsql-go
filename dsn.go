@@ -91,6 +91,7 @@ func parseDSN(dsns string) (*firebirdDsn, error) {
 		"charset":              "UTF8",
 		"client_version":       "",
 		"column_name_to_lower": "false",
+		"gbak_attach":          "false",
 		"host_name":            "",
 		"os_user":              "",
 		"role":                 "",
