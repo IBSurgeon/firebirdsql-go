@@ -127,6 +127,14 @@ type wireProtocol struct {
 	osUser        string
 	hostName      string
 
+	// gbakAttach asks for the attach gbak itself makes (isc_dpb_gbak_attach,
+	// the gbak_attach connection option). Firebird lets such an attach into a
+	// database that is being restored, where it refuses every other one with
+	// "User attachments are not allowed for the database being restored".
+	// An administrator's tool needs it to end a restore: it attaches this way
+	// and deletes the other attachments from MON$ATTACHMENTS.
+	gbakAttach bool
+
 	// Protocol 18/19 execute trailers and inline blob support.
 	cursorFlags       int32
 	maxInlineBlobSize int32
@@ -1305,6 +1313,9 @@ func (p *wireProtocol) opAttach(dbName string, user string, password string, rol
 		[]byte{isc_dpb_utf8_filename, 1, 1},
 	}, nil)
 
+	if p.gbakAttach {
+		dpb = append(dpb, isc_dpb_gbak_attach, 1, 1)
+	}
 	dpb = p.appendClientInfoDPB(dpb)
 	dpb = p.appendAuthAndTimezone(dpb)
 	dpb = p.appendInlineBlobDPB(dpb)

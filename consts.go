@@ -240,6 +240,7 @@ const (
 	isc_dpb_overwrite             = 54
 	isc_dpb_connect_timeout       = 57
 	isc_dpb_dummy_packet_interval = 58
+	isc_dpb_gbak_attach           = 59
 	isc_dpb_sql_role_name         = 60
 	isc_dpb_set_page_buffers      = 61
 	isc_dpb_sql_dialect           = 63
